@@ -1,0 +1,56 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detalhes do Evento - {{ event.tag }}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>Detalhes do Evento</h1>
+        </div>
+    </header>
+    
+    <div class="container">
+        <div class="detail-container">
+            <img src="/{{ event.image_path }}" alt="Evento {{ event.id }}" class="detail-image">
+            
+            <div class="detail-info">
+                <dl>
+                    <dt>ID do Evento:</dt>
+                    <dd>{{ event.id }}</dd>
+                    
+                    <dt>Tipo de Objeto:</dt>
+                    <dd>{{ event.tag }}</dd>
+                    
+                    <dt>Câmera:</dt>
+                    <dd>{{ event.camera_id }}</dd>
+                    
+                    <dt>Timestamp de Recebimento:</dt>
+                    <dd>{{ event.timestamp }}</dd>
+                    
+                    <dt>Início da Detecção:</dt>
+                    <dd>{{ event.start }}</dd>
+                    
+                    <dt>Fim da Detecção:</dt>
+                    <dd>{{ event.end }}</dd>
+                    
+                    <dt>Duração:</dt>
+                    <dd>{{ event.duration }}</dd>
+                    
+                    <dt>Coordenadas Iniciais:</dt>
+                    <dd>{{ event.coord_initial }}</dd>
+                    
+                    <dt>Coordenadas Finais:</dt>
+                    <dd>{{ event.coord_end }}</dd>
+                </dl>
+            </div>
+            
+            <a href="/" class="btn">Voltar para lista</a>
+        </div>
+    </div>
+</body>
+</html>

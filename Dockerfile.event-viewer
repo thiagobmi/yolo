@@ -1,0 +1,25 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Instalar dependências
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+
+# Instalar pacotes Python necessários
+RUN pip install --no-cache-dir fastapi uvicorn jinja2 pillow python-multipart
+
+# Copiar arquivos do visualizador
+COPY event_viewer_demo/ .
+
+# Criar diretórios necessários
+RUN mkdir -p static/images static/css templates
+
+# Variável de ambiente para a porta (padrão: 8080)
+ENV PORT=8080
+
+EXPOSE ${PORT}
+
+# Iniciar o servidor
+CMD python main.py

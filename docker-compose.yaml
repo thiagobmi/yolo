@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  detector:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    runtime: nvidia  # Habilita o uso da GPU
+    environment:
+      - PORT=${NUVYOLO_PORT:-8000}
+      - DOMAIN=192.168.123.30:1975
+      - SPECIFICATIONS_PATH=/app/sample_specifications.json
+      - SEND_EVENT_URL=http://event-viewer:${EVENT_VIEWER_PORT:-8080}/events/receive
+      - SEND_EVENT_TIMEOUT=5
+      - NVIDIA_VISIBLE_DEVICES=all  # Expõe todas as GPUs para o container
+    ports:
+      - "${NUVYOLO_PORT:-8000}:${NUVYOLO_PORT:-8000}"
+    volumes:
+      - ./app:/app/app
+      - ./sample_specifications.json:/app/sample_specifications.json
+    depends_on:
+      - event-viewer
+    restart: unless-stopped
+
+  event-viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile.event-viewer
+    environment:
+      - PORT=${EVENT_VIEWER_PORT:-8080}
+    ports:
+      - "${EVENT_VIEWER_PORT:-8080}:${EVENT_VIEWER_PORT:-8080}"
+    volumes:
+      - event_images:/app/static/images
+    restart: unless-stopped
+    
+volumes:
+  event_images:

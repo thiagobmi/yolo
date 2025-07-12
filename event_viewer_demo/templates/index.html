@@ -1,0 +1,42 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizador de Eventos</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>Visualizador de Eventos</h1>
+        </div>
+    </header>
+    
+    <div class="container">
+        {% if events %}
+            <div class="events-container">
+                {% for event in events %}
+                <div class="event-card">
+                    <img src="/{{ event.image_path }}" alt="Evento {{ event.id }}" class="event-image">
+                    <div class="event-details">
+                        <div class="event-title">{{ event.tag }} (Câmera {{ event.camera_id }})</div>
+                        <div class="event-info">
+                            <p>Detectado em: {{ event.timestamp }}</p>
+                            <p>Duração: {{ event.duration }}</p>
+                        </div>
+                        <a href="/event/{{ event.id }}" class="btn">Ver detalhes</a>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="no-events">
+                <p>Nenhum evento detectado ainda.</p>
+            </div>
+        {% endif %}
+    </div>
+    
+</body>
+</html>

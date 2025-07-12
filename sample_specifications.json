@@ -1,0 +1,13 @@
+{
+    "api_specifications": {
+        "origin_ip": "192.168.123.30",
+        "origin_username": "nuv",
+        "origin_password": "nuv",
+        "edge_ip": "192.168.123.31",
+        "org_username": "apple",
+        "org_password": "apple",
+        "org_name": "Main",
+        "org_domain": "main.org",
+        "ssl": false
+    }
+}
