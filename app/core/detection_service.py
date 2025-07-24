@@ -9,7 +9,7 @@ from ultralytics import YOLO
 
 from app.core.shared_state import active_streams, object_trackers
 from app.utils.logging_utils import setup_logger
-from app.utils.image_utils import convert_frame_to_bytes
+from app.utils.image_utils import convert_frame_to_bytes, draw_bounding_box
 from app.api.models.camera import StreamConfig, CameraInfo
 from app.api.models.event import Event
 from app.external.event_api import send_event
@@ -158,6 +158,9 @@ def process_disappearances(
     if camera_id not in object_trackers:
         return disappeared_objects
 
+    # Keep track of objects to delete later
+    objects_to_delete = []
+
     for track_id in list(object_trackers[camera_id].keys()):
         # Aumenta o contador dos objetos não vistos nesse frame  
         if track_id not in current_track_ids:
@@ -171,45 +174,37 @@ def process_disappearances(
             ):
                 object_trackers[camera_id][track_id]["disappeared"] = True
 
-                # Adiciona objeto como desaparecido
+                # Get the tracker data before potentially deleting it
+                tracker_data = object_trackers[camera_id][track_id]
+
+                # Adiciona objeto como desaparecido with complete data
                 disappeared_objects.append(
                     {
                         "track_id": track_id,
-                        "class": object_trackers[camera_id][track_id]["class"],
-                        "last_bbox": object_trackers[camera_id][track_id]["bbox"],
-                        "last_seen_time": object_trackers[camera_id][track_id].get(
+                        "class": tracker_data["class"],
+                        "last_bbox": tracker_data["bbox"],
+                        "last_seen_time": tracker_data.get(
                             "last_seen_time", datetime.datetime.now().isoformat()
                         ),
+                        "first_seen": tracker_data.get("first_seen"),
+                        "frame": tracker_data.get("frame"),
+                        "initial_bbox": tracker_data.get("initial_bbox")
                     }
                 )
 
-            # Remove dos objetos salvos
+            # Mark for deletion but don't delete yet
             if (
                 object_trackers[camera_id][track_id]["last_seen"]
                 >= stream_config.frames_before_disappearance * 2
             ):
-                del object_trackers[camera_id][track_id]
+                objects_to_delete.append(track_id)
+
+    # Delete objects after processing all disappearances
+    for track_id in objects_to_delete:
+        if track_id in object_trackers[camera_id]:
+            del object_trackers[camera_id][track_id]
 
     return disappeared_objects
-
-
-def log_disappearances(camera_id: int, disappeared_objects: list) -> None:
-    """
-    Printa informações sobre objetos desaparecidos.
-
-    Args:
-        camera_id: ID da câmera
-        disappeared_objects: Lista de objetos desaparecidos
-    """
-    for obj in disappeared_objects:
-        tracker_data = object_trackers[camera_id][obj["track_id"]]
-        initial_time = tracker_data.get(
-            "first_seen", datetime.datetime.now().isoformat()
-        )
-        first_seen = datetime.datetime.fromisoformat(initial_time)
-        duration = (datetime.datetime.now() - first_seen).total_seconds()
-        message = f"{obj['class']} ID:{obj['track_id']} duração: {duration:.2f}s"
-        logger.info(f"Câmera {camera_id}: {message}")
 
 
 async def send_disappearance_events(camera_id: int, disappeared_objects: list) -> None:
@@ -224,9 +219,11 @@ async def send_disappearance_events(camera_id: int, disappeared_objects: list) -
         try:
             track_id = obj["track_id"]
 
-            tracker_data = object_trackers[camera_id][track_id]
-
-            frame_bytes = tracker_data.get("frame")
+            # Get frame and bbox data from the disappeared object
+            frame_bytes = obj.get("frame")
+            bbox = obj.get("initial_bbox")
+            initial_time = obj.get("first_seen", datetime.datetime.now().isoformat())
+            last_seen_time = obj.get("last_seen_time", datetime.datetime.now().isoformat())
 
             if frame_bytes is None:
                 logger.warning(
@@ -234,23 +231,47 @@ async def send_disappearance_events(camera_id: int, disappeared_objects: list) -
                 )
                 continue
 
+            if not bbox:
+                logger.warning(
+                    f"Nenhuma informação de retângulo delimitador para objeto {track_id}"
+                )
+                continue
+
             try:
-                bbox = tracker_data.get("initial_bbox")
-
-                if not bbox:
-                    logger.warning(
-                        f"Nenhuma informação de retângulo delimitador para objeto {track_id}"
-                    )
-                    continue
-
                 x1, y1, x2, y2 = bbox
 
-                initial_time = tracker_data.get(
-                    "first_seen", datetime.datetime.now().isoformat()
-                )
-                last_seen_time = tracker_data.get(
-                    "last_seen_time", datetime.datetime.now().isoformat()
-                )
+                # Convert frame bytes back to numpy array
+                frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
+                frame_image = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+                
+                if frame_image is None:
+                    logger.warning(f"Não foi possível decodificar frame para objeto {track_id}")
+                    final_frame_bytes = frame_bytes
+                else:
+                    # Define color mapping for different classes
+                    color_map = {
+                        "person": (0, 0, 255),    # Red in BGR
+                        "car": (0, 255, 0),       # Green in BGR
+                        "truck": (255, 0, 0),     # Blue in BGR
+                        "bus": (0, 255, 255),     # Yellow in BGR
+                        "motorcycle": (255, 0, 255), # Magenta in BGR
+                        "bicycle": (0, 165, 255),     # Orange in BGR
+                        "train": (128, 0, 128),       # Purple in BGR
+                    }
+                    
+                    color = color_map.get(obj["class"].lower(), (0, 165, 255))
+                    
+                    # Draw bounding box with label
+                    frame_with_bbox = await draw_bounding_box(
+                        frame_image, 
+                        bbox, 
+                        obj["class"].upper(),
+                        color=color,
+                        thickness=3
+                    )
+                    
+                    # Convert back to bytes
+                    final_frame_bytes = await convert_frame_to_bytes(frame_with_bbox)
 
                 event = Event(
                     camera_id=camera_id,
@@ -260,15 +281,13 @@ async def send_disappearance_events(camera_id: int, disappeared_objects: list) -
                     tag=obj["class"],
                     coord_initial=(x1, y1),
                     coord_end=(x2, y2),
-                    print=frame_bytes,
+                    print=final_frame_bytes,
                 )
 
                 await send_event(event)
 
             except Exception as img_error:
-                logger.error(
-                    f"Erro ao processar imagem para objeto {track_id}: {img_error}"
-                )
+                logger.error(f"Erro ao processar imagem para objeto {track_id}: {img_error}")
 
         except Exception as e:
             logger.error(f"Erro ao enviar evento de desaparecimento: {e}")
@@ -330,15 +349,12 @@ async def process_frame(
                     frame,
                 )
 
-
         # Determina objetos desaparecidos
         disappeared_objects = process_disappearances(
           current_track_ids, stream_config
         )
 
         if disappeared_objects:
-            log_disappearances(camera_id, disappeared_objects)
-
             await send_disappearance_events(camera_id, disappeared_objects)
 
     except Exception as e:

@@ -31,13 +31,13 @@ class NUVYOLOTester:
         self.event_counter_process = None
         self.ffmpeg_process = None
         self.results = []
-        self.test_duration = 180  # 3 minutes per test
+        self.test_duration = 60  # 3 minutes per test
         self.added_hostname_mapping = False  # Track if we added hostname mapping
         
         # Test configurations
-        self.confidence_levels = [0.7]
-        self.models = ["yolov8n.pt"]
-        self.trackers = ["botsort.yaml"]
+        self.confidence_levels = [0.2,0.4,0.8,0.9]
+        self.models = ["yolov8n.pt","yolov8m.pt","yolov8x.pt"]
+        self.trackers = ["botsort.yaml","bytetrack.yaml"]
         self.camera_id = 51  # Default camera ID for testing
         
         # FFmpeg stream configuration
@@ -82,20 +82,8 @@ class NUVYOLOTester:
             except Exception as e:
                 logger.warning(f"⚠️  Could not remove hostname mapping: {e}")
         
-        # Stop NUVYOLO first
-        if self.nuvyolo_process:
-            try:
-                logger.info("🛑 Stopping NUVYOLO...")
-                self.nuvyolo_process.terminate()
-                self.nuvyolo_process.wait(timeout=10)
-                logger.info("✅ NUVYOLO stopped")
-            except subprocess.TimeoutExpired:
-                logger.warning("⏰ NUVYOLO didn't respond, force killing...")
-                self.nuvyolo_process.kill()
-                self.nuvyolo_process.wait()
-                logger.info("✅ NUVYOLO force killed")
-            except Exception as e:
-                logger.error(f"❌ Error terminating NUVYOLO process: {e}")
+        # Stop NUVYOLO first (using the improved method)
+        self.stop_nuvyolo()
         
         # Stop FFmpeg stream
         if self.ffmpeg_process:
@@ -120,6 +108,61 @@ class NUVYOLOTester:
                 self.event_counter_process.wait()
             except Exception as e:
                 logger.error(f"Error terminating event counter process: {e}")
+        
+        # Final cleanup - kill any remaining processes
+        try:
+            logger.info("🧹 Final cleanup - killing any remaining uvicorn processes...")
+            subprocess.run(["pkill", "-f", "uvicorn"], capture_output=True)
+            subprocess.run(["pkill", "-f", "event_counter_simple"], capture_output=True)
+            logger.info("✅ Final cleanup completed")
+        except Exception as e:
+            logger.warning(f"⚠️  Final cleanup warning: {e}")
+
+    def generate_test_results_with_events(self, results: List[Dict]) -> str:
+        """Generate HTML for test results with integrated event images"""
+        html = ""
+        for result in results:
+            events_class = "events-high" if result["total_events"] > 10 else "events-medium" if result["total_events"] > 5 else "events-low"
+            
+            html += f'''
+            <div class="test-item-expanded">
+                <div class="test-header" onclick="toggleEvents('{result['test_name']}')">
+                    <div class="test-info">
+                        <div class="test-name">{result['test_name']}</div>
+                        <div class="test-details">
+                            <div class="test-metric">Model: {result['model'].replace('.pt', '')}</div>
+                            <div class="test-metric">Tracker: {result['tracker'].replace('.yaml', '')}</div>
+                            <div class="test-metric">Confidence: {result['confidence']}</div>
+                            <div class="test-metric {events_class}">Events: {result['total_events']}</div>
+                            <div class="test-metric">Duration: {result['duration_seconds']//60}m {result['duration_seconds']%60}s</div>
+                        </div>
+                    </div>
+                    <div class="toggle-icon" id="toggle-{result['test_name']}">▼</div>
+                </div>
+                <div class="events-container" id="events-{result['test_name']}" style="display: none;">'''
+            
+            # Add event images inline
+            for event in result.get("detailed_events", []):
+                if event.get("image_filename"):
+                    event_type_class = f"event-{event['tag'].lower()}"
+                    html += f'''
+                    <div class="event-card-inline">
+                        <img src="dashboard/images/{event['image_filename']}" alt="Event {event['id']}" class="event-image-inline" 
+                             onerror="this.style.display='none'">
+                        <div class="event-info-inline">
+                            <span class="event-type-inline {event_type_class}">{event['tag'].upper()}</span>
+                            <div class="event-time-inline">{event.get('received_at', '')[:19].replace('T', ' ')}</div>
+                            <div class="event-coords-inline">({event.get('coord_initial', [0,0])[0]}, {event.get('coord_initial', [0,0])[1]}) → ({event.get('coord_end', [0,0])[0]}, {event.get('coord_end', [0,0])[1]})</div>
+                        </div>
+                    </div>'''
+            
+            if not result.get("detailed_events"):
+                html += '<div class="no-events-message">No events detected in this test</div>'
+            
+            html += '''
+                </div>
+            </div>'''
+        return html
 
     def start_event_counter(self):
         """Start the event counter server"""
@@ -155,24 +198,39 @@ class NUVYOLOTester:
                 logger.warning(f"⚠️  Could not modify /etc/hosts: {e}")
                 logger.info("💡 You may need to manually add '127.0.0.1 event-viewer' to /etc/hosts")
         
-        # Save the event counter script
+        # Save the event counter script with better PIL handling and debugging
         event_counter_script = '''#!/usr/bin/env python3
 import sys
 import asyncio
+import os
+import io
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Tuple
 import uvicorn
 import logging
-from datetime import datetime
 
-# Configure logging
+# Configure logging first
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s][%(name)s][%(levelname)s]: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger("event_counter")
+
+# Try to import PIL with detailed error reporting
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+    logger.info("✅ PIL/Pillow imported successfully")
+except ImportError as e:
+    PIL_AVAILABLE = False
+    logger.error(f"❌ PIL/Pillow not available: {e}")
+    logger.error("💡 Install with: pip install Pillow")
+except Exception as e:
+    PIL_AVAILABLE = False
+    logger.error(f"❌ Error importing PIL: {e}")
 
 app = FastAPI(title="Event Counter")
 
@@ -194,6 +252,149 @@ event_counters = {
     "all_events": []
 }
 
+def calculate_duration_seconds(start_time_str, end_time_str):
+    """Calculate duration in seconds between two ISO timestamps"""
+    try:
+        start_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+        end_dt = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+        duration = (end_dt - start_dt).total_seconds()
+        return max(0, duration)
+    except Exception as e:
+        logger.error(f"Error calculating duration: {e}")
+        return 0
+
+def draw_bounding_box(image_bytes, coord_initial, coord_end, tag):
+    """
+    Desenha uma bounding box na imagem e adiciona a etiqueta
+    """
+    logger.info(f"🎨 Drawing bounding box for {tag} at {coord_initial} -> {coord_end}")
+    
+    if not PIL_AVAILABLE:
+        logger.error("❌ PIL not available, cannot draw bounding box")
+        return image_bytes
+    
+    try:
+        # Validate input
+        if not image_bytes:
+            logger.error("❌ No image bytes provided")
+            return image_bytes
+            
+        logger.info(f"📷 Image size: {len(image_bytes)} bytes")
+        
+        # Open image
+        img = Image.open(io.BytesIO(image_bytes))
+        logger.info(f"📐 Image dimensions: {img.size}")
+        
+        # Create drawing context
+        draw = ImageDraw.Draw(img)
+        
+        # Color mapping
+        color_map = {
+            "person": (255, 0, 0),    # Red
+            "car": (0, 255, 0),       # Green
+            "truck": (0, 0, 255),     # Blue
+            "bus": (255, 255, 0),     # Yellow
+            "motorcycle": (255, 0, 255), # Magenta
+            "bicycle": (255, 165, 0),     # Orange
+            "train": (128, 0, 128),       # Purple
+        }
+        
+        color = color_map.get(tag.lower(), (255, 165, 0))  # Orange default
+        logger.info(f"🎨 Using color {color} for {tag}")
+        
+        # Get coordinates
+        x1, y1 = coord_initial
+        x2, y2 = coord_end
+        
+        # Ensure coordinates are in correct order
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+            
+        logger.info(f"📦 Final bbox: ({x1}, {y1}) -> ({x2}, {y2})")
+        
+        # Draw thick rectangle
+        thickness = 4
+        for i in range(thickness):
+            draw.rectangle([x1-i, y1-i, x2+i, y2+i], outline=color, width=1)
+        
+        # Prepare text
+        text = tag.upper()
+        font = None
+        
+        # Try to load font
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/System/Library/Fonts/Arial.ttf", 
+            "/Windows/Fonts/arial.ttf",
+            "/usr/share/fonts/TTF/arial.ttf"
+        ]
+        
+        for font_path in font_paths:
+            if os.path.exists(font_path):
+                try:
+                    font = ImageFont.truetype(font_path, 18)
+                    logger.info(f"✅ Using font: {font_path}")
+                    break
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not load font {font_path}: {e}")
+        
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+                logger.info("✅ Using default font")
+            except:
+                logger.warning("⚠️  Could not load any font")
+        
+        # Calculate text position and size
+        if font:
+            try:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+            except:
+                text_width = len(text) * 10
+                text_height = 18
+        else:
+            text_width = len(text) * 10
+            text_height = 18
+        
+        # Position text above bbox
+        text_x = x1
+        text_y = max(5, y1 - text_height - 8)
+        
+        # Draw text background (black rectangle)
+        margin = 4
+        draw.rectangle([
+            text_x - margin, 
+            text_y - margin, 
+            text_x + text_width + margin, 
+            text_y + text_height + margin
+        ], fill=(0, 0, 0))
+        
+        # Draw text
+        if font:
+            draw.text((text_x, text_y), text, fill=color, font=font)
+        else:
+            draw.text((text_x, text_y), text, fill=color)
+        
+        logger.info(f"✅ Text '{text}' drawn at ({text_x}, {text_y})")
+        
+        # Convert back to bytes
+        output_buffer = io.BytesIO()
+        img.save(output_buffer, format="JPEG", quality=95)
+        result_bytes = output_buffer.getvalue()
+        
+        logger.info(f"✅ Bounding box drawn successfully! Output size: {len(result_bytes)} bytes")
+        return result_bytes
+        
+    except Exception as e:
+        logger.error(f"❌ Error drawing bounding box: {e}")
+        import traceback
+        logger.error(f"📚 Traceback: {traceback.format_exc()}")
+        return image_bytes
+
 @app.post("/events/receive")
 async def receive_event(event: EventReceive):
     try:
@@ -207,24 +408,57 @@ async def receive_event(event: EventReceive):
             event_counters["events_by_camera"][event.camera_id] = 0
         event_counters["events_by_camera"][event.camera_id] += 1
         
-        # Save event image
-        import os
+        # Calculate duration
+        duration_seconds = calculate_duration_seconds(event.start, event.end)
+        
+        # Create directories
         os.makedirs("dashboard/images", exist_ok=True)
         
         event_id = f"event_{event_counters['total_events']}"
         image_filename = f"{event_id}.jpg"
         image_path = f"dashboard/images/{image_filename}"
         
-        # Convert hex to bytes and save image
+        logger.info(f"🖼️  Processing event {event_id}: {event.tag}")
+        
+        # Process and save image
         try:
-            image_bytes = bytes.fromhex(event.print)
-            with open(image_path, "wb") as img_file:
-                img_file.write(image_bytes)
+            # Convert hex to bytes
+            if not event.print:
+                logger.error("❌ No image data in event")
+                image_filename = None
+            else:
+                logger.info(f"📥 Converting hex image data ({len(event.print)} chars)")
+                image_bytes = bytes.fromhex(event.print)
+                logger.info(f"📷 Original image: {len(image_bytes)} bytes")
+                
+                # Draw bounding box
+                image_with_bbox = draw_bounding_box(
+                    image_bytes, 
+                    event.coord_initial, 
+                    event.coord_end, 
+                    event.tag
+                )
+                
+                # Save to file
+                with open(image_path, "wb") as img_file:
+                    img_file.write(image_with_bbox)
+                
+                logger.info(f"💾 Image saved: {image_path} ({len(image_with_bbox)} bytes)")
+                
+                # Verify file was created
+                if os.path.exists(image_path):
+                    file_size = os.path.getsize(image_path)
+                    logger.info(f"✅ File verified: {image_path} ({file_size} bytes)")
+                else:
+                    logger.error(f"❌ File not found after save: {image_path}")
+                    
         except Exception as img_error:
-            logger.error(f"Error saving image: {img_error}")
+            logger.error(f"❌ Error processing image: {img_error}")
+            import traceback
+            logger.error(f"📚 Image error traceback: {traceback.format_exc()}")
             image_filename = None
         
-        # Store detailed event data
+        # Store event data
         event_data = {
             "id": event_id,
             "camera_id": event.camera_id,
@@ -234,17 +468,21 @@ async def receive_event(event: EventReceive):
             "tag": event.tag,
             "coord_initial": event.coord_initial,
             "coord_end": event.coord_end,
+            "duration_seconds": duration_seconds,
             "received_at": datetime.now().isoformat(),
             "test_session": event_counters.get("test_session"),
             "image_filename": image_filename
         }
         event_counters["all_events"].append(event_data)
         
-        logger.info(f"Event #{event_counters['total_events']}: {event.tag} from camera {event.camera_id}")
+        logger.info(f"✅ Event #{event_counters['total_events']}: {event.tag} from camera {event.camera_id} (duration: {duration_seconds:.2f}s)")
         
         return {"status": "success", "total_count": event_counters["total_events"]}
+        
     except Exception as e:
-        logger.error(f"Error receiving event: {e}")
+        logger.error(f"❌ Error receiving event: {e}")
+        import traceback
+        logger.error(f"📚 Event error traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/stats")
@@ -295,7 +533,15 @@ async def root():
     }
 
 if __name__ == "__main__":
-    logger.info("Starting Event Counter server on port 8080...")
+    logger.info("🚀 Starting Event Counter server on port 8080...")
+    
+    # Check PIL availability at startup
+    if PIL_AVAILABLE:
+        logger.info("✅ PIL/Pillow is available - bounding boxes will be drawn")
+    else:
+        logger.error("❌ PIL/Pillow is NOT available - bounding boxes will NOT be drawn")
+        logger.error("💡 Install with: pip install Pillow")
+    
     try:
         uvicorn.run(
             "event_counter_simple:app", 
@@ -320,7 +566,7 @@ if __name__ == "__main__":
             
             # Wait for server to start
             logger.info("⏳ Waiting for event counter to start...")
-            time.sleep(5)  # Increased from 3 to 5 seconds
+            time.sleep(5)
             
             # Test if server is running with more detailed checks
             max_retries = 10
@@ -328,7 +574,6 @@ if __name__ == "__main__":
                 try:
                     response = requests.get(f"{self.event_counter_url}/", timeout=2)
                     if response.status_code == 200:
-                        # Try to parse as JSON
                         try:
                             json_response = response.json()
                             logger.info("✅ Event counter server started successfully")
@@ -337,9 +582,7 @@ if __name__ == "__main__":
                         except ValueError as json_error:
                             logger.warning(f"⚠️  Server responding but not JSON: {response.text[:100]}")
                             if i == max_retries - 1:
-                                # Last attempt, still not JSON - might be uvicorn startup message
                                 logger.info("🔄 Server seems to be starting up, trying direct endpoint test...")
-                                # Test a specific endpoint
                                 try:
                                     stats_response = requests.get(f"{self.event_counter_url}/stats", timeout=2)
                                     if stats_response.status_code == 200:
@@ -416,22 +659,53 @@ if __name__ == "__main__":
         
         if self.nuvyolo_process:
             try:
+                # Get the process PID for more aggressive killing if needed
+                pid = self.nuvyolo_process.pid
+                logger.info(f"🔍 NUVYOLO PID: {pid}")
+                
+                # First try graceful termination
                 self.nuvyolo_process.terminate()
                 
                 # Wait for graceful shutdown
                 try:
-                    self.nuvyolo_process.wait(timeout=10)
+                    self.nuvyolo_process.wait(timeout=5)  # Reduced timeout
                     logger.info("✅ NUVYOLO stopped gracefully")
                 except subprocess.TimeoutExpired:
                     # Force kill if it doesn't respond
                     logger.warning("⏰ NUVYOLO didn't respond to SIGTERM, forcing kill...")
                     self.nuvyolo_process.kill()
-                    self.nuvyolo_process.wait()
-                    logger.info("✅ NUVYOLO forcefully stopped")
+                    try:
+                        self.nuvyolo_process.wait(timeout=3)
+                        logger.info("✅ NUVYOLO forcefully stopped")
+                    except subprocess.TimeoutExpired:
+                        # Ultimate fallback - kill by PID
+                        logger.warning("💀 Using system kill on PID...")
+                        try:
+                            import os
+                            import signal
+                            os.kill(pid, signal.SIGKILL)
+                            logger.info("✅ NUVYOLO killed via system call")
+                        except ProcessLookupError:
+                            logger.info("✅ Process already dead")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to kill process: {e}")
                 
                 self.nuvyolo_process = None
-                return True
                 
+                # Additional check - kill any remaining uvicorn processes
+                try:
+                    result = subprocess.run([
+                        "pkill", "-f", "uvicorn app.main:app"
+                    ], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        logger.info("✅ Killed remaining uvicorn processes")
+                    else:
+                        logger.info("ℹ️  No remaining uvicorn processes found")
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not check for remaining processes: {e}")
+                
+                return True
+                    
             except Exception as e:
                 logger.error(f"❌ Error stopping NUVYOLO: {e}")
                 return False
@@ -1045,7 +1319,7 @@ if __name__ == "__main__":
             events_class = "events-high" if result["total_events"] > 10 else "events-medium" if result["total_events"] > 5 else "events-low"
             
             html += f'''
-        <div class="test-item" data-test-name="{result['test_name']}">
+        <div class="test-item" data-test-name="{result['test_name']}" onclick="openTestDetails('{result['test_name']}')">
             <div class="test-name">{result['test_name']}</div>
             <div class="test-details">
                 <div class="test-metric">Model: {result['model'].replace('.pt', '')}</div>
@@ -1064,296 +1338,294 @@ if __name__ == "__main__":
         stats = self.calculate_test_statistics(summary["detailed_results"])
         
         html_content = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NUVYOLO Test Results Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f7fa;
-            color: #333;
-        }}
-        .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 15px;
-            margin-bottom: 30px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-        }}
-        .header h1 {{
-            margin: 0;
-            font-size: 2.5em;
-            font-weight: 300;
-        }}
-        .header p {{
-            margin: 10px 0 0 0;
-            opacity: 0.9;
-            font-size: 1.1em;
-        }}
-        .stats-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }}
-        .stat-card {{
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            border-left: 4px solid #667eea;
-        }}
-        .stat-number {{
-            font-size: 2.5em;
-            font-weight: bold;
-            color: #667eea;
-            margin: 0;
-        }}
-        .stat-label {{
-            color: #666;
-            margin: 5px 0 0 0;
-            font-size: 0.9em;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }}
-        .charts-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 30px;
-            margin-bottom: 30px;
-        }}
-        .chart-container {{
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        }}
-        .chart-title {{
-            font-size: 1.3em;
-            font-weight: 600;
-            margin-bottom: 20px;
-            color: #333;
-        }}
-        .test-list {{
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            overflow: hidden;
-        }}
-        .test-list h2 {{
-            background: #f8f9fa;
-            margin: 0;
-            padding: 25px;
-            border-bottom: 1px solid #e9ecef;
-            font-size: 1.5em;
-            color: #333;
-        }}
-        .test-item {{
-            padding: 20px 25px;
-            border-bottom: 1px solid #e9ecef;
-            transition: background-color 0.3s ease;
-            cursor: pointer;
-        }}
-        .test-item:hover {{
-            background-color: #f8f9fa;
-        }}
-        .test-item:last-child {{
-            border-bottom: none;
-        }}
-        .test-name {{
-            font-weight: 600;
-            color: #333;
-            margin-bottom: 8px;
-        }}
-        .test-details {{
-            color: #666;
-            font-size: 0.9em;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 10px;
-        }}
-        .test-metric {{
-            background: #f1f3f4;
-            padding: 5px 10px;
-            border-radius: 5px;
-            text-align: center;
-        }}
-        .events-high {{ background-color: #d4edda; color: #155724; }}
-        .events-medium {{ background-color: #fff3cd; color: #856404; }}
-        .events-low {{ background-color: #f8d7da; color: #721c24; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>🎯 NUVYOLO Test Results Dashboard</h1>
-        <p>Comprehensive analysis of object detection performance across models, trackers, and confidence levels</p>
-        <p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | <strong>Total Tests:</strong> {len(summary["detailed_results"])}</p>
-    </div>
-
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-number">{len(summary["detailed_results"])}</div>
-            <div class="stat-label">Total Tests</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-number">{stats["total_events"]}</div>
-            <div class="stat-label">Total Events Detected</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-number">{stats["avg_events"]:.1f}</div>
-            <div class="stat-label">Average Events per Test</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-number">{len(summary["test_summary"]["models"])}</div>
-            <div class="stat-label">Models Tested</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-number">{len(summary["test_summary"]["trackers"])}</div>
-            <div class="stat-label">Trackers Tested</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-number">{summary["test_summary"]["test_duration_per_test"]//60}m</div>
-            <div class="stat-label">Test Duration</div>
-        </div>
-    </div>
-
-    <div class="charts-grid">
-        <div class="chart-container">
-            <div class="chart-title">📊 Events by Confidence Level</div>
-            <canvas id="confidenceChart"></canvas>
-        </div>
-        <div class="chart-container">
-            <div class="chart-title">🤖 Events by Model</div>
-            <canvas id="modelChart"></canvas>
-        </div>
-        <div class="chart-container">
-            <div class="chart-title">🎯 Events by Tracker</div>
-            <canvas id="trackerChart"></canvas>
-        </div>
-        <div class="chart-container">
-            <div class="chart-title">🚗 Object Types Distribution</div>
-            <canvas id="objectChart"></canvas>
-        </div>
-    </div>
-
-    <div class="test-list">
-        <h2>📋 Detailed Test Results</h2>
-        {self.generate_test_list_html(summary["detailed_results"])}
-    </div>
-
-    <script>
-        // Chart.js configurations
-        const chartOptions = {{
-            responsive: true,
-            plugins: {{
-                legend: {{ position: 'top' }},
-                tooltip: {{ mode: 'index', intersect: false }}
-            }},
-            scales: {{
-                y: {{ beginAtZero: true }}
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>NUVYOLO Test Results Dashboard</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f5f7fa;
+                color: #333;
             }}
-        }};
+            .header {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 30px;
+                border-radius: 15px;
+                margin-bottom: 30px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            }}
+            .header h1 {{
+                margin: 0;
+                font-size: 2.5em;
+                font-weight: 300;
+            }}
+            .header p {{
+                margin: 10px 0 0 0;
+                opacity: 0.9;
+                font-size: 1.1em;
+            }}
+            .stats-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }}
+            .stat-card {{
+                background: white;
+                padding: 25px;
+                border-radius: 12px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                border-left: 4px solid #667eea;
+            }}
+            .stat-number {{
+                font-size: 2.5em;
+                font-weight: bold;
+                color: #667eea;
+                margin: 0;
+            }}
+            .stat-label {{
+                color: #666;
+                margin: 5px 0 0 0;
+                font-size: 0.9em;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }}
+            .charts-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+                gap: 30px;
+                margin-bottom: 30px;
+            }}
+            .chart-container {{
+                background: white;
+                padding: 25px;
+                border-radius: 12px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            }}
+            .chart-title {{
+                font-size: 1.3em;
+                font-weight: 600;
+                margin-bottom: 20px;
+                color: #333;
+            }}
+            .test-list {{
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                overflow: hidden;
+            }}
+            .test-list h2 {{
+                background: #f8f9fa;
+                margin: 0;
+                padding: 25px;
+                border-bottom: 1px solid #e9ecef;
+                font-size: 1.5em;
+                color: #333;
+            }}
+            .test-item {{
+                padding: 20px 25px;
+                border-bottom: 1px solid #e9ecef;
+                transition: background-color 0.3s ease;
+                cursor: pointer;
+            }}
+            .test-item:hover {{
+                background-color: #f8f9fa;
+            }}
+            .test-item:last-child {{
+                border-bottom: none;
+            }}
+            .test-name {{
+                font-weight: 600;
+                color: #333;
+                margin-bottom: 8px;
+            }}
+            .test-details {{
+                color: #666;
+                font-size: 0.9em;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 10px;
+            }}
+            .test-metric {{
+                background: #f1f3f4;
+                padding: 5px 10px;
+                border-radius: 5px;
+                text-align: center;
+            }}
+            .events-high {{ background-color: #d4edda; color: #155724; }}
+            .events-medium {{ background-color: #fff3cd; color: #856404; }}
+            .events-low {{ background-color: #f8d7da; color: #721c24; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🎯 NUVYOLO Test Results Dashboard</h1>
+            <p>Comprehensive analysis of object detection performance across models, trackers, and confidence levels</p>
+            <p><strong>Generated:</strong> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | <strong>Total Tests:</strong> {len(summary["detailed_results"])}</p>
+        </div>
 
-        // Confidence Chart
-        const confidenceData = {json.dumps(stats["by_confidence"])};
-        new Chart(document.getElementById('confidenceChart'), {{
-            type: 'bar',
-            data: {{
-                labels: Object.keys(confidenceData),
-                datasets: [{{
-                    label: 'Total Events',
-                    data: Object.values(confidenceData),
-                    backgroundColor: 'rgba(102, 126, 234, 0.8)',
-                    borderColor: 'rgba(102, 126, 234, 1)',
-                    borderWidth: 2
-                }}]
-            }},
-            options: chartOptions
-        }});
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number">{len(summary["detailed_results"])}</div>
+                <div class="stat-label">Total Tests</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{stats["total_events"]}</div>
+                <div class="stat-label">Total Events Detected</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{stats["avg_events"]:.1f}</div>
+                <div class="stat-label">Average Events per Test</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{len(summary["test_summary"]["models"])}</div>
+                <div class="stat-label">Models Tested</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{len(summary["test_summary"]["trackers"])}</div>
+                <div class="stat-label">Trackers Tested</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{summary["test_summary"]["test_duration_per_test"]//60}m</div>
+                <div class="stat-label">Test Duration</div>
+            </div>
+        </div>
 
-        // Model Chart
-        const modelData = {json.dumps(stats["by_model"])};
-        new Chart(document.getElementById('modelChart'), {{
-            type: 'bar',
-            data: {{
-                labels: Object.keys(modelData),
-                datasets: [{{
-                    label: 'Total Events',
-                    data: Object.values(modelData),
-                    backgroundColor: 'rgba(118, 75, 162, 0.8)',
-                    borderColor: 'rgba(118, 75, 162, 1)',
-                    borderWidth: 2
-                }}]
-            }},
-            options: chartOptions
-        }});
+        <div class="charts-grid">
+            <div class="chart-container">
+                <div class="chart-title">📊 Events by Confidence Level</div>
+                <canvas id="confidenceChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">🤖 Events by Model</div>
+                <canvas id="modelChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">🎯 Events by Tracker</div>
+                <canvas id="trackerChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">🚗 Object Types Distribution</div>
+                <canvas id="objectChart"></canvas>
+            </div>
+        </div>
 
-        // Tracker Chart
-        const trackerData = {json.dumps(stats["by_tracker"])};
-        new Chart(document.getElementById('trackerChart'), {{
-            type: 'doughnut',
-            data: {{
-                labels: Object.keys(trackerData),
-                datasets: [{{
-                    data: Object.values(trackerData),
-                    backgroundColor: ['rgba(255, 99, 132, 0.8)', 'rgba(54, 162, 235, 0.8)'],
-                    borderColor: ['rgba(255, 99, 132, 1)', 'rgba(54, 162, 235, 1)'],
-                    borderWidth: 2
-                }}]
-            }},
-            options: {{
+        <div class="test-list">
+            <h2>📋 Detailed Test Results</h2>
+            {self.generate_test_list_html(summary["detailed_results"])}
+        </div>
+
+        <script>
+            // Chart.js configurations
+            const chartOptions = {{
                 responsive: true,
                 plugins: {{
-                    legend: {{ position: 'top' }}
+                    legend: {{ position: 'top' }},
+                    tooltip: {{ mode: 'index', intersect: false }}
+                }},
+                scales: {{
+                    y: {{ beginAtZero: true }}
                 }}
-            }}
-        }});
+            }};
 
-        // Object Types Chart
-        const objectData = {json.dumps(stats["by_object_type"])};
-        new Chart(document.getElementById('objectChart'), {{
-            type: 'pie',
-            data: {{
-                labels: Object.keys(objectData),
-                datasets: [{{
-                    data: Object.values(objectData),
-                    backgroundColor: [
-                        'rgba(255, 99, 132, 0.8)',
-                        'rgba(54, 162, 235, 0.8)',
-                        'rgba(255, 205, 86, 0.8)',
-                        'rgba(75, 192, 192, 0.8)',
-                        'rgba(153, 102, 255, 0.8)',
-                        'rgba(255, 159, 64, 0.8)'
-                    ]
-                }}]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{
-                    legend: {{ position: 'right' }}
-                }}
-            }}
-        }});
-
-        // Test item click handlers
-        document.querySelectorAll('.test-item').forEach(item => {{
-            item.addEventListener('click', function() {{
-                const testName = this.dataset.testName;
-                window.open(`test_details_${{testName}}.html`, '_blank');
+            // Confidence Chart
+            const confidenceData = {json.dumps(stats["by_confidence"])};
+            new Chart(document.getElementById('confidenceChart'), {{
+                type: 'bar',
+                data: {{
+                    labels: Object.keys(confidenceData),
+                    datasets: [{{
+                        label: 'Total Events',
+                        data: Object.values(confidenceData),
+                        backgroundColor: 'rgba(102, 126, 234, 0.8)',
+                        borderColor: 'rgba(102, 126, 234, 1)',
+                        borderWidth: 2
+                    }}]
+                }},
+                options: chartOptions
             }});
-        }});
-    </script>
-</body>
-</html>'''
+
+            // Model Chart
+            const modelData = {json.dumps(stats["by_model"])};
+            new Chart(document.getElementById('modelChart'), {{
+                type: 'bar',
+                data: {{
+                    labels: Object.keys(modelData),
+                    datasets: [{{
+                        label: 'Total Events',
+                        data: Object.values(modelData),
+                        backgroundColor: 'rgba(118, 75, 162, 0.8)',
+                        borderColor: 'rgba(118, 75, 162, 1)',
+                        borderWidth: 2
+                    }}]
+                }},
+                options: chartOptions
+            }});
+
+            // Tracker Chart
+            const trackerData = {json.dumps(stats["by_tracker"])};
+            new Chart(document.getElementById('trackerChart'), {{
+                type: 'doughnut',
+                data: {{
+                    labels: Object.keys(trackerData),
+                    datasets: [{{
+                        data: Object.values(trackerData),
+                        backgroundColor: ['rgba(255, 99, 132, 0.8)', 'rgba(54, 162, 235, 0.8)'],
+                        borderColor: ['rgba(255, 99, 132, 1)', 'rgba(54, 162, 235, 1)'],
+                        borderWidth: 2
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{
+                        legend: {{ position: 'top' }}
+                    }}
+                }}
+            }});
+
+            // Object Types Chart
+            const objectData = {json.dumps(stats["by_object_type"])};
+            new Chart(document.getElementById('objectChart'), {{
+                type: 'pie',
+                data: {{
+                    labels: Object.keys(objectData),
+                    datasets: [{{
+                        data: Object.values(objectData),
+                        backgroundColor: [
+                            'rgba(255, 99, 132, 0.8)',
+                            'rgba(54, 162, 235, 0.8)',
+                            'rgba(255, 205, 86, 0.8)',
+                            'rgba(75, 192, 192, 0.8)',
+                            'rgba(153, 102, 255, 0.8)',
+                            'rgba(255, 159, 64, 0.8)'
+                        ]
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    plugins: {{
+                        legend: {{ position: 'right' }}
+                    }}
+                }}
+            }});
+
+            // Open test details page
+            function openTestDetails(testName) {{
+                window.open(`test_details_${{testName}}.html`, '_blank');
+            }}
+        </script>
+    </body>
+    </html>'''
         
         with open(os.path.join(dashboard_dir, "index.html"), "w") as f:
             f.write(html_content)
+                            
 
     def create_test_detail_pages(self, summary: Dict, dashboard_dir: str):
         """Create individual test detail pages"""
@@ -1367,6 +1639,17 @@ if __name__ == "__main__":
         # Process events for timeline
         events_timeline = []
         for event in test_result.get("detailed_events", []):
+            # Use duration_seconds if available, otherwise calculate from timestamps
+            duration = event.get("duration_seconds", 0)
+            if duration == 0:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(event.get("start", "").replace('Z', '+00:00'))
+                    end_dt = datetime.fromisoformat(event.get("end", "").replace('Z', '+00:00'))
+                    duration = (end_dt - start_dt).total_seconds()
+                except:
+                    duration = 0
+            
             events_timeline.append({
                 "id": event.get("id", ""),
                 "timestamp": event.get("received_at", ""),
@@ -1374,184 +1657,183 @@ if __name__ == "__main__":
                 "camera": event.get("camera_id", ""),
                 "start": event.get("start", ""),
                 "end": event.get("end", ""),
+                "duration_seconds": duration,
                 "coord_initial": event.get("coord_initial", [0, 0]),
                 "coord_end": event.get("coord_end", [0, 0]),
                 "image_filename": event.get("image_filename", None)
             })
         
         html_content = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Test Details: {test_name}</title>
-    <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f7fa;
-            color: #333;
-        }}
-        .header {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 15px;
-            margin-bottom: 30px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-        }}
-        .back-button {{
-            display: inline-block;
-            padding: 10px 20px;
-            background: rgba(255,255,255,0.2);
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            transition: background 0.3s;
-        }}
-        .back-button:hover {{
-            background: rgba(255,255,255,0.3);
-        }}
-        .test-config {{
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            margin-bottom: 30px;
-        }}
-        .config-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-        }}
-        .config-item {{
-            text-align: center;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }}
-        .config-label {{
-            font-size: 0.9em;
-            color: #666;
-            margin-bottom: 5px;
-        }}
-        .config-value {{
-            font-size: 1.3em;
-            font-weight: bold;
-            color: #333;
-        }}
-        .events-section {{
-            background: white;
-            padding: 25px;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            margin-bottom: 30px;
-        }}
-        .events-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 20px;
-            max-height: 600px;
-            overflow-y: auto;
-        }}
-        .event-card {{
-            background: white;
-            border: 1px solid #e9ecef;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }}
-        .event-card:hover {{
-            transform: translateY(-5px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-        }}
-        .event-image {{
-            width: 100%;
-            height: 200px;
-            object-fit: cover;
-            background: #f8f9fa;
-        }}
-        .event-details {{
-            padding: 15px;
-        }}
-        .event-title {{
-            font-size: 1.1em;
-            font-weight: bold;
-            margin-bottom: 10px;
-            color: #333;
-        }}
-        .event-type {{
-            display: inline-block;
-            font-weight: bold;
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 0.8em;
-            margin-bottom: 8px;
-        }}
-        .event-car {{ background: #d4edda; color: #155724; }}
-        .event-truck {{ background: #fff3cd; color: #856404; }}
-        .event-person {{ background: #cce5ff; color: #004085; }}
-        .event-bus {{ background: #f8d7da; color: #721c24; }}
-        .event-motorcycle {{ background: #e7d4ff; color: #6a1b9a; }}
-        .event-bicycle {{ background: #fff0e6; color: #bf6900; }}
-        .event-meta {{
-            font-size: 0.9em;
-            color: #666;
-            line-height: 1.4;
-        }}
-        .event-coords {{
-            background: #f1f3f4;
-            padding: 5px 8px;
-            border-radius: 4px;
-            font-family: monospace;
-            font-size: 0.8em;
-            margin-top: 5px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <a href="index.html" class="back-button">← Back to Dashboard</a>
-        <h1>🔍 Test Details: {test_name}</h1>
-        <p>Detailed analysis of individual test run</p>
-    </div>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Test Details: {test_name}</title>
+        <style>
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f5f7fa;
+                color: #333;
+            }}
+            .header {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 30px;
+                border-radius: 15px;
+                margin-bottom: 30px;
+                box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            }}
+            .back-button {{
+                display: inline-block;
+                padding: 10px 20px;
+                background: rgba(255,255,255,0.2);
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+                margin-bottom: 20px;
+                transition: background 0.3s;
+            }}
+            .back-button:hover {{
+                background: rgba(255,255,255,0.3);
+            }}
+            .test-config {{
+                background: white;
+                padding: 25px;
+                border-radius: 12px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                margin-bottom: 30px;
+            }}
+            .config-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+            }}
+            .config-item {{
+                text-align: center;
+                padding: 15px;
+                background: #f8f9fa;
+                border-radius: 8px;
+            }}
+            .config-label {{
+                font-size: 0.9em;
+                color: #666;
+                margin-bottom: 5px;
+            }}
+            .config-value {{
+                font-size: 1.3em;
+                font-weight: bold;
+                color: #333;
+            }}
+            .events-section {{
+                background: white;
+                padding: 25px;
+                border-radius: 12px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                margin-bottom: 30px;
+            }}
+            .events-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+                gap: 20px;
+            }}
+            .event-card {{
+                background: white;
+                border: 1px solid #e9ecef;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }}
+            .event-card:hover {{
+                transform: translateY(-5px);
+                box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            }}
+            .event-image {{
+                width: 100%;
+                height: 200px;
+                object-fit: cover;
+                background: #f8f9fa;
+            }}
+            .event-details {{
+                padding: 15px;
+            }}
+            .event-title {{
+                font-size: 1.1em;
+                font-weight: bold;
+                margin-bottom: 10px;
+                color: #333;
+            }}
+            .event-type {{
+                display: inline-block;
+                font-weight: bold;
+                padding: 4px 8px;
+                border-radius: 12px;
+                font-size: 0.8em;
+                margin-bottom: 8px;
+            }}
+            .event-car {{ background: #d4edda; color: #155724; }}
+            .event-truck {{ background: #fff3cd; color: #856404; }}
+            .event-person {{ background: #cce5ff; color: #004085; }}
+            .event-bus {{ background: #f8d7da; color: #721c24; }}
+            .event-motorcycle {{ background: #e7d4ff; color: #6a1b9a; }}
+            .event-bicycle {{ background: #fff0e6; color: #bf6900; }}
+            .event-meta {{
+                font-size: 0.9em;
+                color: #666;
+                line-height: 1.4;
+            }}
+            .event-coords {{
+                background: #f1f3f4;
+                padding: 5px 8px;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 0.8em;
+                margin-top: 5px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <a href="index.html" class="back-button">← Back to Dashboard</a>
+            <h1>🔍 Test Details: {test_name}</h1>
+            <p>Detailed analysis of individual test run</p>
+        </div>
 
-    <div class="test-config">
-        <h2>⚙️ Test Configuration</h2>
-        <div class="config-grid">
-            <div class="config-item">
-                <div class="config-label">Model</div>
-                <div class="config-value">{test_result['model'].replace('.pt', '')}</div>
-            </div>
-            <div class="config-item">
-                <div class="config-label">Tracker</div>
-                <div class="config-value">{test_result['tracker'].replace('.yaml', '')}</div>
-            </div>
-            <div class="config-item">
-                <div class="config-label">Confidence</div>
-                <div class="config-value">{test_result['confidence']}</div>
-            </div>
-            <div class="config-item">
-                <div class="config-label">Total Events</div>
-                <div class="config-value">{test_result['total_events']}</div>
-            </div>
-            <div class="config-item">
-                <div class="config-label">Duration</div>
-                <div class="config-value">{test_result['duration_seconds']//60}m {test_result['duration_seconds']%60}s</div>
-            </div>
-            <div class="config-item">
-                <div class="config-label">Timestamp</div>
-                <div class="config-value">{test_result['timestamp'][:19].replace('T', ' ')}</div>
+        <div class="test-config">
+            <h2>⚙️ Test Configuration</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <div class="config-label">Model</div>
+                    <div class="config-value">{test_result['model'].replace('.pt', '')}</div>
+                </div>
+                <div class="config-item">
+                    <div class="config-label">Tracker</div>
+                    <div class="config-value">{test_result['tracker'].replace('.yaml', '')}</div>
+                </div>
+                <div class="config-item">
+                    <div class="config-label">Confidence</div>
+                    <div class="config-value">{test_result['confidence']}</div>
+                </div>
+                <div class="config-item">
+                    <div class="config-label">Total Events</div>
+                    <div class="config-value">{test_result['total_events']}</div>
+                </div>
+                <div class="config-item">
+                    <div class="config-label">Duration</div>
+                    <div class="config-value">{test_result['duration_seconds']//60}m {test_result['duration_seconds']%60}s</div>
+                </div>
+                <div class="config-item">
+                    <div class="config-label">Timestamp</div>
+                    <div class="config-value">{test_result['timestamp'][:19].replace('T', ' ')}</div>
+                </div>
             </div>
         </div>
-    </div>
 
-    <div class="events-section">
-        <h2>📸 Detected Events ({len(events_timeline)})</h2>
-        <div class="events-grid">'''
+        <div class="events-section">
+            <h2>📸 Detected Events ({len(events_timeline)})</h2>
+            <div class="events-grid">'''
         
         # Add event cards
         for event in events_timeline:
@@ -1567,7 +1849,7 @@ if __name__ == "__main__":
                     <div class="event-meta">
                         <strong>Camera:</strong> {event['camera']}<br>
                         <strong>Time:</strong> {event['timestamp'][:19].replace('T', ' ')}<br>
-                        <strong>Duration:</strong> {event['start']} - {event['end']}
+                        <strong>Duration:</strong> {event['duration_seconds']:.2f} seconds
                     </div>
                     <div class="event-coords">
                         Start: ({event['coord_initial'][0]}, {event['coord_initial'][1]})<br>
@@ -1577,10 +1859,10 @@ if __name__ == "__main__":
             </div>'''
         
         html_content += '''
+            </div>
         </div>
-    </div>
-</body>
-</html>'''
+    </body>
+    </html>'''
         
         # Save the individual test page
         test_file_path = os.path.join(dashboard_dir, f"test_details_{test_name}.html")
@@ -1654,7 +1936,45 @@ def main():
         if 'tester' in locals():
             logger.info("🧹 Cleaning up processes...")
             tester.cleanup_processes()
-        logger.info("✅ Cleanup completed")
+            
+            # Extra paranoid cleanup - make sure uvicorn is really dead
+            logger.info("🔍 Checking for remaining processes...")
+            try:
+                # Check for any remaining uvicorn processes
+                result = subprocess.run(["pgrep", "-f", "uvicorn"], capture_output=True, text=True)
+                if result.stdout.strip():
+                    remaining_pids = result.stdout.strip().split('\n')
+                    logger.warning(f"⚠️  Found {len(remaining_pids)} remaining uvicorn processes: {remaining_pids}")
+                    
+                    # Kill them with extreme prejudice
+                    subprocess.run(["pkill", "-9", "-f", "uvicorn"], capture_output=True)
+                    time.sleep(1)  # Give it a moment
+                    
+                    # Verify they're really gone
+                    result2 = subprocess.run(["pgrep", "-f", "uvicorn"], capture_output=True, text=True)
+                    if result2.stdout.strip():
+                        logger.error("❌ Some uvicorn processes are still running!")
+                        logger.error("💡 You may need to manually kill them: sudo pkill -9 -f uvicorn")
+                    else:
+                        logger.info("✅ All remaining uvicorn processes killed")
+                else:
+                    logger.info("✅ No remaining uvicorn processes found")
+                    
+                # Also check for event counter processes
+                result3 = subprocess.run(["pgrep", "-f", "event_counter_simple"], capture_output=True, text=True)
+                if result3.stdout.strip():
+                    logger.info("🧹 Killing remaining event counter processes...")
+                    subprocess.run(["pkill", "-9", "-f", "event_counter_simple"], capture_output=True)
+                    
+            except Exception as e:
+                logger.warning(f"⚠️  Could not check for remaining processes: {e}")
+                logger.info("💡 You may want to manually check: ps aux | grep uvicorn")
+
+        command = ["killall", "-9", "uvicorn"]
+
+        result = subprocess.run(command, capture_output=True, text=True)
+                
+        logger.info("✅ Cleanup completed - all processes should be terminated")
 
 
 if __name__ == "__main__":
