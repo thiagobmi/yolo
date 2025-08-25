@@ -311,54 +311,108 @@ async def process_frame(
 
 
 async def process_camera_stream(
-    camera_info: CameraInfo, stream_config: StreamConfig
+   camera_info: CameraInfo, stream_config: StreamConfig
 ) -> None:
-    """
-    Loop mínimo sem controle de FPS
-    """
-    cam_id = camera_info.camera_id
-    local_model = YOLO(stream_config.detection_model_path)
-    initialize_tracker_for_camera(cam_id)
+   """
+   Loop com lógica de reconexão
+   """
+   cam_id = camera_info.camera_id
+   local_model = YOLO(stream_config.detection_model_path)
+   initialize_tracker_for_camera(cam_id)
+   
+   capture = None
+   frames_processed = 0
+   start_time = time.time()
+   reconnect_attempts = 0
+   max_reconnect_attempts = 5
+   reconnect_delay = 2
 
-    capture = cv2.VideoCapture(camera_info.url)
-    if not capture.isOpened():
-        logger.error(f"Não foi possível abrir câmera {cam_id}")
-        return
+   try:
+       while cam_id in active_streams and active_streams[cam_id]["active"]:
+           
+           # Lógica de conexão/reconexão
+           if capture is None or not capture.isOpened():
+               if reconnect_attempts >= max_reconnect_attempts:
+                   logger.error(f"Falha ao conectar à câmera {cam_id} após {max_reconnect_attempts} tentativas")
+                   active_streams[cam_id]["active"] = False
+                   break
 
-    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    frames_processed = 0
-    start_time = time.time()
+               if reconnect_attempts > 0:
+                   backoff_delay = min(reconnect_delay * (2 ** (reconnect_attempts - 1)), 30)
+                   logger.info(f"Aguardando {backoff_delay:.1f}s antes de reconectar câmera {cam_id}")
+                   await asyncio.sleep(backoff_delay)
 
-    try:
-        while cam_id in active_streams and active_streams[cam_id]["active"]:
-            ret, frame = capture.read()
-            if not ret:
-                break
+               # logger.info(f"Conectando à câmera {cam_id} (tentativa {reconnect_attempts + 1})")
+               
+               try:
+                   capture = cv2.VideoCapture(camera_info.url)
+                   
+                   if capture.isOpened():
+                       capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                       logger.info(f"Câmera {cam_id} conectada com sucesso")
+                       reconnect_attempts = 0
+                       
+                   else:
+                       logger.warning(f"Falha ao abrir câmera {cam_id}")
+                       reconnect_attempts += 1
+                       if capture:
+                           capture.release()
+                           capture = None
+                       continue
+                       
+               except Exception as e:
+                   logger.error(f"Erro ao conectar câmera {cam_id}: {e}")
+                   reconnect_attempts += 1
+                   if capture:
+                       capture.release()
+                       capture = None
+                   continue
 
-            frames_processed += 1
-            
-            # Processar a cada N frames para simular FPS
-            if frames_processed % (30 // stream_config.frames_per_second) == 0:
-                try:
-                    await asyncio.wait_for(
-                        process_frame(local_model, stream_config, frame),
-                        timeout=2.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(f"Timeout frame {frames_processed}")
+           # Leitura do frame
+           try:
+               ret, frame = capture.read()
+               if not ret or frame is None:
+                   logger.warning(f"Falha ao ler frame da câmera {cam_id}")
+                   capture.release()
+                   capture = None
+                   reconnect_attempts += 1
+                   continue
+                   
+           except Exception as read_error:
+               logger.error(f"Erro ao ler frame da câmera {cam_id}: {read_error}")
+               capture.release()
+               capture = None
+               reconnect_attempts += 1
+               continue
 
-            # Log status
-            if frames_processed % 50 == 0:
-                elapsed = time.time() - start_time
-                fps = frames_processed / elapsed
-                logger.info(f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média")
+           frames_processed += 1
+           
+           # Processar a cada N frames para simular FPS
+           if frames_processed % (30 // stream_config.frames_per_second) == 0:
+               try:
+                   await asyncio.wait_for(
+                       process_frame(local_model, stream_config, frame),
+                       timeout=2.0
+                   )
+               except asyncio.TimeoutError:
+                   logger.error(f"Timeout frame {frames_processed}")
 
-            # Yield controle
-            if frames_processed % 10 == 0:
-                await asyncio.sleep(0)
+           # Log status
+           if frames_processed % 50 == 0:
+               elapsed = time.time() - start_time
+               fps = frames_processed / elapsed
+               logger.info(f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média")
 
-    finally:
-        capture.release()
-        elapsed = time.time() - start_time
-        final_fps = frames_processed / elapsed if elapsed > 0 else 0
-        logger.info(f"Câmera {cam_id} encerrada - {frames_processed} frames em {elapsed:.1f}s ({final_fps:.1f} fps)")
+           # Yield controle
+           if frames_processed % 10 == 0:
+               await asyncio.sleep(0)
+
+   finally:
+       if capture is not None and capture.isOpened():
+           capture.release()
+       if cam_id in active_streams:
+           active_streams[cam_id]["active"] = False
+       
+       elapsed = time.time() - start_time
+       final_fps = frames_processed / elapsed if elapsed > 0 else 0
+       logger.info(f"Câmera {cam_id} encerrada - {frames_processed} frames em {elapsed:.1f}s ({final_fps:.1f} fps)")
