@@ -1,8 +1,5 @@
 import os
 from dotenv import load_dotenv
-from typing import Optional
-
-from requests import get
 
 # Carrega variáveis de ambiente do arquivo .env
 load_dotenv()
@@ -30,3 +27,7 @@ SEND_EVENT_TIMEOUT = int(get_env_var("SEND_EVENT_TIMEOUT"))
 MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "5"))
 INITIAL_RECONNECT_DELAY = int(os.getenv("INITIAL_RECONNECT_DELAY", "1"))
 MAX_RECONNECT_DELAY = int(os.getenv("MAX_RECONNECT_DELAY", "30"))
+
+WIDTH_CONVERT = int(get_env_var("WIDTH_CONVERT"))  # Largura para redimensionamento de frames
+QUALITY_CONVERT = int(get_env_var("QUALITY_CONVERT"))  # Qualidade JPEG (1-100)
+

@@ -6,44 +6,25 @@ from app.utils.logging_utils import setup_logger
 
 logger = setup_logger("image_utils")
 
-async def convert_frame_to_bytes(frame: np.ndarray) -> bytes:
+async def convert_frame_to_bytes(frame: np.ndarray, quality) -> bytes:
     """
-    Converte um frame OpenCV para jpg usando cv2.imencode.
-
-    Args:
-        frame: O array numpy representando o frame de imagem.
-
-    Returns:
-        Imagem codificada como bytes.
-        
-    Raises:
-        ValueError: Se o frame for inválido ou ocorrer erro na codificação.
+    Conversão com qualidade configurável
     """
-    # Verificar se o frame é válido
     if frame is None or frame.size == 0:
-        logger.error("Frame inválido passado para convert_frame_to_bytes")
         raise ValueError("Frame inválido")
 
-    quality = 95  # Qualidade da imagem
-    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    encode_params = [
+        int(cv2.IMWRITE_JPEG_QUALITY), quality,
+    ]
 
     try:
         success, encoded_image = cv2.imencode(".jpg", frame, encode_params)
-
         if not success:
-            logger.error("Falha ao codificar a imagem para bytes")
-            raise ValueError("Falha ao codificar a imagem para bytes")
-
-        # Verificar se o resultado é válido
-        if encoded_image is None or encoded_image.size == 0:
-            logger.error("Resultado da codificação é inválido")
-            raise ValueError("Resultado da codificação é inválido")
-
+            raise ValueError("Falha ao codificar")
         return encoded_image.tobytes()
-
     except Exception as e:
-        logger.error(f"Erro ao converter frame para bytes: {e}")
-        raise ValueError(f"Erro ao converter frame para bytes: {e}")
+        logger.error(f"Erro ao converter frame: {e}")
+        raise
 
 async def draw_bounding_box(
     image: np.ndarray, 

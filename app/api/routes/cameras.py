@@ -34,6 +34,7 @@ async def start_monitoring(
     camera_id = stream_config.camera_id
     try:
         response = await start_monitoring_camera(stream_config)
+        print(response)
 
         # if(stream_config.frames_per_second <= 0):...
         # if(stream_config.frames_before_disappearance <= 0):...
