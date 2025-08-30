@@ -17,6 +17,7 @@ class StreamConfig(BaseModel):
     frames_per_second: int
     frames_before_disappearance: int
     confidence_threshold: float
+    min_track_frames: int = 7
     iou: float
 
 class CameraResponse(BaseModel):
