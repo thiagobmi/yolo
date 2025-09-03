@@ -1,4 +1,5 @@
 import asyncio
+from os import major
 import time
 import datetime
 import cv2
@@ -17,13 +18,21 @@ from app.config import settings
 
 logger = setup_logger("detection_service")
 
-# Cache para mapeamento de classes
+# Cache para converter classes para IDs
 _class_mapping_cache = {}
+STREAM_FPS=30
 
+def initialize_tracker_for_camera(camera_id: int) -> None:
+    """
+    Inicializa o dicionario de objetos para uma câmera específica, se ainda não existir.
+    """
+    if camera_id not in object_trackers:
+        object_trackers[camera_id] = {}
 
 async def extract_detections(result, scale_factor=1.0) -> List[Dict[str, Any]]:
     """
-    Extrai as informações (bbox, classe e id) de uma detecção do YOLO.
+    Extrai as informações (bbox, classe, id e confiança) de uma detecção do YOLO.
+    Ajusta as bounding boxes caso o frame tenha sido redimensionado.
     """
     detections = []
 
@@ -60,14 +69,6 @@ async def extract_detections(result, scale_factor=1.0) -> List[Dict[str, Any]]:
     return detections
 
 
-def initialize_tracker_for_camera(camera_id: int) -> None:
-    """
-    Inicializa o dicionario de objetos para uma câmera específica, se ainda não existir.
-    """
-    if camera_id not in object_trackers:
-        object_trackers[camera_id] = {}
-
-
 async def update_tracked_object(
     camera_id: int,
     track_id: int,
@@ -83,6 +84,8 @@ async def update_tracked_object(
     current_time = datetime.datetime.now().isoformat()
 
     x1, y1, x2, y2 = bbox
+
+    # Testar se a bbox é valida
     if x1 >= x2 or y1 >= y2:
         return
 
@@ -90,11 +93,10 @@ async def update_tracked_object(
         try:
             height, width = frame.shape[:2]
 
-            # Redimensionar usando WIDTH_CONVERT configurável
-
-            if width > settings.WIDTH_CONVERT:
-                scale = settings.WIDTH_CONVERT / width
-                new_width = settings.WIDTH_CONVERT
+            # Redimensiona o frame para economizar memória. width = WIDTH_RESIZE
+            if width > settings.WIDTH_RESIZE:
+                scale = settings.WIDTH_RESIZE / width
+                new_width = settings.WIDTH_RESIZE
                 new_height = int(height * scale)
                 frame_resized = cv2.resize(
                     frame,
@@ -112,7 +114,7 @@ async def update_tracked_object(
                 frame_resized = frame
                 bbox_for_frame = bbox
 
-            # Usar QUALITY_CONVERT configurável
+            # Converter o frame. qualidade do jpeg = QUALITY_CONVERT.
             frame_bytes = await convert_frame_to_bytes(
                 frame_resized, settings.QUALITY_CONVERT
             )
@@ -124,17 +126,16 @@ async def update_tracked_object(
                 "bbox": bbox,
                 "frame": frame_bytes,
                 "bbox_for_frame": bbox_for_frame,
-                "detection_history": [{"class": class_name, "confidence": confidence}],
+                "detection_history": [{"class": class_name, "confidence": confidence}], # Salva também a classe e conf de cada detecção.
                 "first_seen": current_time,
                 "last_seen_time": current_time,
                 "initial_bbox": bbox,
             }
 
-            # {"class": 1,
-            #  "confidence": 0.7}
 
         except Exception as e:
             # Fallback sem frame
+
             object_trackers[camera_id][track_id] = {
                 "class": class_name,
                 "last_seen": 0,
@@ -148,6 +149,7 @@ async def update_tracked_object(
                 "initial_bbox": bbox,
             }
     else:
+        # Objeto com esse ID já existe. Atualização do objeto.
         object_trackers[camera_id][track_id].update(
             {
                 "last_seen": 0,
@@ -177,14 +179,14 @@ def validate_detection_consistency(detection_history: list, min_percentage: floa
     # Conta as ocorrências de cada classe
     class_counts = Counter(detection["class"] for detection in detection_history)
     
-    # Encontra a classe mais comum
+    # encontra a classe mais comum
     most_common_class, most_common_count = class_counts.most_common(1)[0]
     
-    # Calcula a porcentagem da classe mais comum
+    # calcula a porcentagem da classe mais comum
     total_detections = len(detection_history)
     percentage = most_common_count / total_detections
     
-    # Verifica se atende ao critério mínimo
+    # Verifica se tem no mínimo essa porcentagem da mesma classe
     is_valid = percentage >= min_percentage
     
     return is_valid, most_common_class
@@ -215,20 +217,19 @@ async def send_disappearance_events(stream_config: StreamConfig, camera_id: int,
 
             x1, y1, x2, y2 = bbox_for_frame
 
-            # print(disappeared_objects[0]["detection_history"])  
-            
             detection_history = obj["detection_history"]
             
             # mínimo de detecções >= min_track
             min_len = len(detection_history) >= stream_config.min_track_frames
             
-            # 70% das detecções são da mesma classe
-            is_class_consistent, dominant_class = validate_detection_consistency(
+            # 70% ou + das detecções são da mesma classe
+            is_class_consistent, main_class = validate_detection_consistency(
                 detection_history, 
                 min_percentage=0.7  # stream_config.min_class_percentage 
             )
 
-            # minimo de detecções seguidas da mesma classe >=
+            #TODO?
+            # minimo de detecções seguidas da mesma classe 
             # tamanho da bbox
 
             if not min_len or not is_class_consistent:
@@ -239,7 +240,7 @@ async def send_disappearance_events(stream_config: StreamConfig, camera_id: int,
                 start=initial_time,
                 end=last_seen_time,
                 event_type="objects",
-                tag=dominant_class, #obj["class"],
+                tag=main_class, #obj["class"],
                 coord_initial=(x1, y1),
                 coord_end=(x2, y2),
                 print=frame_bytes,
@@ -302,9 +303,10 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
                     }
                 )
 
+            # Deleta objetos que já estão sem aparecer há muitos frames.
             if (
                 object_trackers[camera_id][track_id]["last_seen"]
-                >= stream_config.frames_before_disappearance * 1.2
+                >= stream_config.frames_before_disappearance #* 1.2
             ):
                 objects_to_delete.append(track_id)
 
@@ -312,13 +314,16 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
         if track_id in object_trackers[camera_id]:
             del object_trackers[camera_id][track_id]
 
-    # if len(object_trackers[camera_id]) > 50:
+
+    #MAX_OBJECTS = 200
+    # Deletar objetos mais antigos para economizar memória.
+    # if len(object_trackers[camera_id]) > 200:
     #     sorted_objects = sorted(
     #         object_trackers[camera_id].items(),
     #         key=lambda x: x[1].get("last_seen_time", ""),
     #         reverse=True
     #     )
-    #     objects_to_keep = dict(sorted_objects[:30])
+    #     objects_to_keep = dict(sorted_objects[:(MAX_OBJECTS/2)])
     #     object_trackers[camera_id] = objects_to_keep
     #     logger.warning(f"Limpeza de memória: câmera {camera_id} tinha muitos objetos")
 
@@ -333,6 +338,8 @@ async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -
     try:
         camera_id = stream_config.camera_id
 
+
+        # Converter nomes de classes para índices. Cache para evitar processamento desnecessário.
         cache_key = f"{camera_id}_{hash(tuple(stream_config.classes or []))}"
         if cache_key not in _class_mapping_cache:
             if stream_config.classes:
@@ -349,10 +356,11 @@ async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -
             class_ids = _class_mapping_cache[cache_key]
 
         try:
-            height, width = frame.shape[:2]
-            target_size = 1280  # or 1024, experiment with this
 
-            if width < target_size:
+            height, width = frame.shape[:2]
+            target_size = 1280  # or 1024
+
+            if settings.RESIZE_FRAME and width < target_size:
                 scale_factor = target_size / width
                 scaled_height = int(height * scale_factor)
                 scaled_frame = cv2.resize(frame, (target_size, scaled_height))
@@ -363,7 +371,7 @@ async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -
             results = await asyncio.wait_for(
                 asyncio.to_thread(
                     model.track,
-                    source=scaled_frame,  # <- Changed this
+                    source=scaled_frame,  
                     persist=True,
                     conf=stream_config.confidence_threshold,
                     iou=stream_config.iou,
@@ -413,14 +421,15 @@ async def process_camera_stream(
     """
     cam_id = camera_info.camera_id
     local_model = YOLO(stream_config.detection_model_path)
+
     initialize_tracker_for_camera(cam_id)
 
     capture = None
     frames_processed = 0
     start_time = time.time()
     reconnect_attempts = 0
-    max_reconnect_attempts = 5
-    reconnect_delay = 2
+    max_reconnect_attempts = settings.MAX_RECONNECT_ATTEMPTS or 5
+    reconnect_delay = settings.INITIAL_RECONNECT_DELAY or 1
 
     try:
         while cam_id in active_streams and active_streams[cam_id]["active"]:
@@ -489,7 +498,7 @@ async def process_camera_stream(
             frames_processed += 1
 
             # Processar a cada N frames para simular FPS
-            if frames_processed % (30 // stream_config.frames_per_second) == 0:
+            if frames_processed % (STREAM_FPS // stream_config.frames_per_second) == 0:
                 try:
                     await asyncio.wait_for(
                         process_frame(local_model, stream_config, frame), timeout=2.0
@@ -498,16 +507,16 @@ async def process_camera_stream(
                     logger.error(f"Timeout frame {frames_processed}")
 
             # Log status
-            if frames_processed % 50 == 0:
-                elapsed = time.time() - start_time
-                fps = frames_processed / elapsed
-                logger.info(
-                    f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média"
-                )
+            # if frames_processed % 50 == 0:
+            #     elapsed = time.time() - start_time
+            #     fps = frames_processed / elapsed
+            #     logger.info(
+            #         f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média"
+            #     )
 
             # Yield controle
-            if frames_processed % 10 == 0:
-                await asyncio.sleep(0)
+            # if frames_processed % 10 == 0:
+            #     await asyncio.sleep(0)
 
     finally:
         if capture is not None and capture.isOpened():

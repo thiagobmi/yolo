@@ -25,9 +25,10 @@ SEND_EVENT_TIMEOUT = int(get_env_var("SEND_EVENT_TIMEOUT"))
 
 # Configurações de conexão de câmera (opcional)
 MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "5"))
-INITIAL_RECONNECT_DELAY = int(os.getenv("INITIAL_RECONNECT_DELAY", "1"))
-MAX_RECONNECT_DELAY = int(os.getenv("MAX_RECONNECT_DELAY", "30"))
+INITIAL_RECONNECT_DELAY = int(os.getenv("INITIAL_RECONNECT_DELAY", "2"))
 
-WIDTH_CONVERT = int(get_env_var("WIDTH_CONVERT"))  # Largura para redimensionamento de frames
 QUALITY_CONVERT = int(get_env_var("QUALITY_CONVERT"))  # Qualidade JPEG (1-100)
+
+RESIZE_FRAME=bool(get_env_var("RESIZE_FRAME"))
+WIDTH_RESIZE = int(get_env_var("WIDTH_CONVERT"))  # Largura para redimensionamento de frames
 
