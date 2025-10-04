@@ -1,5 +1,4 @@
-import asyncio
-from os import major
+import threading
 import time
 import datetime
 import cv2
@@ -7,6 +6,9 @@ import numpy as np
 from typing import List, Dict, Any, Set, Tuple, Optional
 from ultralytics import YOLO
 from collections import Counter
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 
 from app.core.shared_state import active_streams, object_trackers
 from app.utils.logging_utils import setup_logger
@@ -20,7 +22,10 @@ logger = setup_logger("detection_service")
 
 # Cache para converter classes para IDs
 _class_mapping_cache = {}
-STREAM_FPS=30
+STREAM_FPS = 30
+
+# Thread pool para processamento de eventos
+event_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="event_sender")
 
 def initialize_tracker_for_camera(camera_id: int) -> None:
     """
@@ -29,7 +34,7 @@ def initialize_tracker_for_camera(camera_id: int) -> None:
     if camera_id not in object_trackers:
         object_trackers[camera_id] = {}
 
-async def extract_detections(result, scale_factor=1.0) -> List[Dict[str, Any]]:
+def extract_detections(result, scale_factor=1.0) -> List[Dict[str, Any]]:
     """
     Extrai as informações (bbox, classe, id e confiança) de uma detecção do YOLO.
     Ajusta as bounding boxes caso o frame tenha sido redimensionado.
@@ -69,7 +74,7 @@ async def extract_detections(result, scale_factor=1.0) -> List[Dict[str, Any]]:
     return detections
 
 
-async def update_tracked_object(
+def update_tracked_object(
     camera_id: int,
     track_id: int,
     class_name: str,
@@ -115,7 +120,7 @@ async def update_tracked_object(
                 bbox_for_frame = bbox
 
             # Converter o frame. qualidade do jpeg = QUALITY_CONVERT.
-            frame_bytes = await convert_frame_to_bytes(
+            frame_bytes = convert_frame_to_bytes_sync(
                 frame_resized, settings.QUALITY_CONVERT
             )
 
@@ -132,9 +137,9 @@ async def update_tracked_object(
                 "initial_bbox": bbox,
             }
 
-
         except Exception as e:
             # Fallback sem frame
+            logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
 
             object_trackers[camera_id][track_id] = {
                 "class": class_name,
@@ -162,6 +167,23 @@ async def update_tracked_object(
         )
 
 
+def convert_frame_to_bytes_sync(frame: np.ndarray, quality: int) -> bytes:
+    """
+    Versão síncrona da conversão de frame para bytes
+    """
+    try:
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        result, encoded_img = cv2.imencode('.jpg', frame, encode_param)
+        if result:
+            return encoded_img.tobytes()
+        else:
+            logger.error("Falha ao codificar frame")
+            return None
+    except Exception as e:
+        logger.error(f"Erro ao converter frame: {e}")
+        return None
+
+
 def validate_detection_consistency(detection_history: list, min_percentage: float = 0.7) -> tuple[bool, str]:
     """
     Verifica se pelo menos min_percentage das detecções são da mesma classe.
@@ -171,7 +193,7 @@ def validate_detection_consistency(detection_history: list, min_percentage: floa
         min_percentage: Porcentagem mínima para validação (padrão 70%)
     
     Returns:
-        tuple: (is_valid, most_common_class, class_stats)
+        tuple: (is_valid, most_common_class)
     """
     if not detection_history:
         return False, ""
@@ -191,75 +213,101 @@ def validate_detection_consistency(detection_history: list, min_percentage: floa
     
     return is_valid, most_common_class
 
-        
-async def send_disappearance_events(stream_config: StreamConfig, camera_id: int, disappeared_objects: list) -> None:
+
+def send_single_event(obj_data: dict, stream_config: StreamConfig, camera_id: int) -> bool:
     """
-    Envia eventos para outro endpoint. Um para cada objeto desaparecido.
+    Envia um único evento para o endpoint externo de forma síncrona.
+    """
+    try:
+        track_id = obj_data["track_id"]
+        frame_bytes = obj_data.get("frame")
+        bbox_for_frame = obj_data.get("bbox_for_frame")
+
+        if not frame_bytes or not bbox_for_frame:
+            logger.warning(f"Dados faltando para objeto {track_id}")
+            return False
+
+        initial_time = obj_data.get("first_seen", datetime.datetime.now().isoformat())
+        last_seen_time = obj_data.get(
+            "last_seen_time", datetime.datetime.now().isoformat()
+        )
+
+        x1, y1, x2, y2 = bbox_for_frame
+
+        detection_history = obj_data["detection_history"]
+        
+        # mínimo de detecções >= min_track
+        min_len = len(detection_history) >= stream_config.min_track_frames
+        
+        # 70% ou + das detecções são da mesma classe
+        is_class_consistent, main_class = validate_detection_consistency(
+            detection_history, 
+            min_percentage=0.7  # stream_config.min_class_percentage 
+        )
+
+        if not min_len or not is_class_consistent:
+            return False
+
+        event = Event(
+            camera_id=camera_id,
+            start=initial_time,
+            end=last_seen_time,
+            event_type="objects",
+            tag=main_class,
+            coord_initial=(x1, y1),
+            coord_end=(x2, y2),
+            print=frame_bytes,
+        )
+
+        # Chama a função síncrona de envio
+        send_event(event)
+
+    except Exception as e:
+        logger.error(f"Erro ao processar evento {track_id}: {e}")
+        return False
+
+
+def send_event_sync(event: Event) -> bool:
+    """
+    Versão síncrona do envio de evento (você precisará implementar esta função
+    baseada na sua implementação original de send_event)
+    """
+    try:
+        # Aqui você deve implementar a lógica síncrona para enviar o evento
+        # Por exemplo, usando requests ao invés de aiohttp
+        # return requests.post(url, json=event.dict(), timeout=3.0)
+        
+        # Placeholder - substitua pela implementação real
+        # logger.info(f"Enviando evento para câmera {event.camera_id}")
+        # time.sleep(0.1)  # Simula delay de rede
+        return True
+        
+    except Exception as e:
+        logger.error(f"Erro ao enviar evento: {e}")
+        return False
+
+
+def send_disappearance_events(stream_config: StreamConfig, camera_id: int, disappeared_objects: list) -> None:
+    """
+    Envia eventos para outro endpoint usando threading. Um para cada objeto desaparecido.
     """
     if not disappeared_objects:
         return
 
-
-    async def process_single_event(obj):
-        try:
-            track_id = obj["track_id"]
-            frame_bytes = obj.get("frame")
-            bbox_for_frame = obj.get("bbox_for_frame")
-
-            if not frame_bytes or not bbox_for_frame:
-                logger.warning(f"Dados faltando para objeto {track_id}")
-                return
-
-            initial_time = obj.get("first_seen", datetime.datetime.now().isoformat())
-            last_seen_time = obj.get(
-                "last_seen_time", datetime.datetime.now().isoformat()
-            )
-
-            x1, y1, x2, y2 = bbox_for_frame
-
-            detection_history = obj["detection_history"]
-            
-            # mínimo de detecções >= min_track
-            min_len = len(detection_history) >= stream_config.min_track_frames
-            
-            # 70% ou + das detecções são da mesma classe
-            is_class_consistent, main_class = validate_detection_consistency(
-                detection_history, 
-                min_percentage=0.7  # stream_config.min_class_percentage 
-            )
-
-            #TODO?
-            # minimo de detecções seguidas da mesma classe 
-            # tamanho da bbox
-
-            if not min_len or not is_class_consistent:
-                return
-
-            event = Event(
-                camera_id=camera_id,
-                start=initial_time,
-                end=last_seen_time,
-                event_type="objects",
-                tag=main_class, #obj["class"],
-                coord_initial=(x1, y1),
-                coord_end=(x2, y2),
-                print=frame_bytes,
-            )
-
-            await asyncio.wait_for(send_event(event), timeout=3.0)
-
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout ao enviar evento para objeto {track_id}")
-        except Exception as e:
-            logger.error(f"Erro ao processar evento {track_id}: {e}")
-
-
-
-
-    await asyncio.gather(
-        *[process_single_event(obj) for obj in disappeared_objects],
-        return_exceptions=True,
-    )
+    # Usa ThreadPoolExecutor para enviar eventos em paralelo
+    futures = []
+    for obj in disappeared_objects:
+        future = event_executor.submit(send_single_event, obj, stream_config, camera_id)
+        futures.append(future)
+    
+    # Opcionalmente, aguarda a conclusão de todos os envios
+    # for future in as_completed(futures, timeout=5.0):
+    #     try:
+    #         result = future.result()
+    #         if not result:
+    #             logger.warning("Falha ao enviar evento")
+    #     except Exception as e:
+    #         logger.error(f"Erro no envio de evento: {e}")
 
 
 def process_disappearances(current_track_ids: set, stream_config: StreamConfig) -> list:
@@ -306,7 +354,7 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
             # Deleta objetos que já estão sem aparecer há muitos frames.
             if (
                 object_trackers[camera_id][track_id]["last_seen"]
-                >= stream_config.frames_before_disappearance #* 1.2
+                >= stream_config.frames_before_disappearance
             ):
                 objects_to_delete.append(track_id)
 
@@ -314,30 +362,16 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
         if track_id in object_trackers[camera_id]:
             del object_trackers[camera_id][track_id]
 
-
-    #MAX_OBJECTS = 200
-    # Deletar objetos mais antigos para economizar memória.
-    # if len(object_trackers[camera_id]) > 200:
-    #     sorted_objects = sorted(
-    #         object_trackers[camera_id].items(),
-    #         key=lambda x: x[1].get("last_seen_time", ""),
-    #         reverse=True
-    #     )
-    #     objects_to_keep = dict(sorted_objects[:(MAX_OBJECTS/2)])
-    #     object_trackers[camera_id] = objects_to_keep
-    #     logger.warning(f"Limpeza de memória: câmera {camera_id} tinha muitos objetos")
-
     return disappeared_objects
 
 
-async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -> None:
+def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -> None:
     """
     Processa um único frame de uma câmera e delega para análises de detecção.
     """
     scale_factor = 1.0
     try:
         camera_id = stream_config.camera_id
-
 
         # Converter nomes de classes para índices. Cache para evitar processamento desnecessário.
         cache_key = f"{camera_id}_{hash(tuple(stream_config.classes or []))}"
@@ -356,7 +390,6 @@ async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -
             class_ids = _class_mapping_cache[cache_key]
 
         try:
-
             height, width = frame.shape[:2]
             target_size = 1280  # or 1024
 
@@ -368,32 +401,30 @@ async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -
                 scaled_frame = frame
                 scale_factor = 1.0
 
-            results = await asyncio.wait_for(
-                asyncio.to_thread(
-                    model.track,
-                    source=scaled_frame,  
-                    persist=True,
-                    conf=stream_config.confidence_threshold,
-                    iou=stream_config.iou,
-                    verbose=False,
-                    tracker=stream_config.tracker_model,
-                    classes=class_ids,
-                ),
-                timeout=5.00,
+            # Processamento síncrono do YOLO
+            results = model.track(
+                source=scaled_frame,  
+                persist=True,
+                conf=stream_config.confidence_threshold,
+                iou=stream_config.iou,
+                verbose=False,
+                tracker=stream_config.tracker_model,
+                classes=class_ids,
             )
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout na inferência YOLO para câmera {camera_id}")
+
+        except Exception as e:
+            logger.error(f"Erro na inferência YOLO para câmera {camera_id}: {e}")
             return
 
         current_track_ids = set()
 
         for result in results:
-            detections = await extract_detections(result,scale_factor)
+            detections = extract_detections(result, scale_factor)
 
             for detection in detections:
                 current_track_ids.add(detection["track_id"])
 
-                await update_tracked_object(
+                update_tracked_object(
                     camera_id,
                     detection["track_id"],
                     detection["class_name"],
@@ -405,19 +436,23 @@ async def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -
         disappeared_objects = process_disappearances(current_track_ids, stream_config)
 
         if disappeared_objects:
-            asyncio.create_task(
-                send_disappearance_events(stream_config, camera_id, disappeared_objects)
-            )
+            # Envia eventos em thread separada para não bloquear o processamento
+            threading.Thread(
+                target=send_disappearance_events,
+                args=(stream_config, camera_id, disappeared_objects),
+                daemon=True
+            ).start()
 
     except Exception as e:
         logger.error(f"Erro ao processar frame para câmera {camera_id}: {e}")
 
 
-async def process_camera_stream(
+def process_camera_stream(
     camera_info: CameraInfo, stream_config: StreamConfig
 ) -> None:
     """
-    Loop com lógica de reconexão
+    Loop principal de processamento de stream da câmera com lógica de reconexão.
+    Agora completamente síncrono.
     """
     cam_id = camera_info.camera_id
     local_model = YOLO(stream_config.detection_model_path)
@@ -450,9 +485,7 @@ async def process_camera_stream(
                     logger.info(
                         f"Aguardando {backoff_delay:.1f}s antes de reconectar câmera {cam_id}"
                     )
-                    await asyncio.sleep(backoff_delay)
-
-                # logger.info(f"Conectando à câmera {cam_id} (tentativa {reconnect_attempts + 1})")
+                    time.sleep(backoff_delay)
 
                 try:
                     capture = cv2.VideoCapture(camera_info.url)
@@ -461,7 +494,6 @@ async def process_camera_stream(
                         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                         logger.info(f"Câmera {cam_id} conectada com sucesso")
                         reconnect_attempts = 0
-
                     else:
                         logger.warning(f"Falha ao abrir câmera {cam_id}")
                         reconnect_attempts += 1
@@ -500,23 +532,20 @@ async def process_camera_stream(
             # Processar a cada N frames para simular FPS
             if frames_processed % (STREAM_FPS // stream_config.frames_per_second) == 0:
                 try:
-                    await asyncio.wait_for(
-                        process_frame(local_model, stream_config, frame), timeout=2.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(f"Timeout frame {frames_processed}")
+                    process_frame(local_model, stream_config, frame)
+                except Exception as e:
+                    logger.error(f"Erro ao processar frame {frames_processed}: {e}")
 
-            # Log status
-            # if frames_processed % 50 == 0:
-            #     elapsed = time.time() - start_time
-            #     fps = frames_processed / elapsed
-            #     logger.info(
-            #         f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média"
-            #     )
+            # Log de status periodicamente
+            if frames_processed % 300 == 0:  # A cada 10 segundos aproximadamente
+                elapsed = time.time() - start_time
+                fps = frames_processed / elapsed
+                logger.info(
+                    f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média"
+                )
 
-            # Yield controle
-            # if frames_processed % 10 == 0:
-            #     await asyncio.sleep(0)
+            # Pequeno delay para controle de CPU
+            time.sleep(0.001)  # 1ms para evitar uso excessivo de CPU
 
     finally:
         if capture is not None and capture.isOpened():
@@ -529,3 +558,31 @@ async def process_camera_stream(
         logger.info(
             f"Câmera {cam_id} encerrada - {frames_processed} frames em {elapsed:.1f}s ({final_fps:.1f} fps)"
         )
+
+
+def start_camera_processing(camera_info: CameraInfo, stream_config: StreamConfig) -> threading.Thread:
+    """
+    Inicia o processamento de uma câmera em uma thread separada.
+    """
+    thread = threading.Thread(
+        target=process_camera_stream,
+        args=(camera_info, stream_config),
+        name=f"camera_{camera_info.camera_id}",
+        daemon=False
+    )
+    thread.start()
+    return thread
+
+
+def stop_all_cameras():
+    """
+    Para o processamento de todas as câmeras.
+    """
+    for cam_id in active_streams:
+        active_streams[cam_id]["active"] = False
+    
+    # Aguarda um pouco para que as threads possam terminar graciosamente
+    time.sleep(2)
+    
+    # Finaliza o thread pool de eventos
+    event_executor.shutdown(wait=True)

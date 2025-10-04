@@ -8,7 +8,7 @@ from app.config import settings
 logger = setup_logger("event_api")
 
 
-async def send_event(event: Event) -> Optional[Dict[str, Any]]:
+def send_event(event: Event) -> Optional[Dict[str, Any]]:
     """
     Envia o evento para o endpoint de eventos.
 
@@ -45,20 +45,23 @@ async def send_event(event: Event) -> Optional[Dict[str, Any]]:
 
         if response.status_code == 200:
             result = response.json()
-            logger.info(f"Evento enviado ID: {result.get('event_id')}")
+            # logger.info(f"Evento enviado ID: {result.get('event_id')}")
             return result
         else:
-            logger.error(
-                f"Falha ao enviar evento para o visualizador. Código de status: {response.status_code}"
-            )
-            logger.error(f"Resposta: {response.text}")
+            # logger.error(
+            #     f"Falha ao enviar evento para o visualizador. Código de status: {response.status_code}"
+            # )
+            # logger.error(f"Resposta: {response.text}")
             return None
 
     except requests.exceptions.Timeout:
-        logger.error("Timeout ao enviar evento para o visualizador de eventos")
+        ...
+        # logger.error("Timeout ao enviar evento para o visualizador de eventos")
     except requests.exceptions.RequestException as e:
-        logger.error(f"Erro de requisição ao enviar evento para o visualizador: {e}")
+        ...
+        # logger.error(f"Erro de requisição ao enviar evento para o visualizador: {e}")
     except Exception as e:
-        logger.error(f"Erro geral ao enviar evento para o visualizador: {e}")
+        ...
+        # logger.error(f"Erro geral ao enviar evento para o visualizador: {e}")
 
     return None

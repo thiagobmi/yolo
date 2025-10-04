@@ -1,4 +1,5 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
+import threading
 from typing import Dict, Any, List
 
 from app.api.models.camera import CameraInfo, StreamConfig, CameraResponse, MonitoredCamerasResponse
@@ -43,12 +44,33 @@ async def start_monitoring(
         
         if "camera" in response and response["camera"] is not None:
             # Cria uma tarefa em background para cada stream
-            background_tasks.add_task(process_camera_stream, response["camera"], stream_config)
+            t = threading.Thread(
+            target=process_camera_stream,
+            args=(response["camera"], stream_config),
+            daemon=True  # encerra junto com o processo principal
+            )
+            t.start()
             
         return response
     except Exception as exc:
         logger.error(f"Erro ao iniciar monitoramento para câmera {camera_id}: {exc}")
         raise HTTPException(status_code=500, detail="Erro interno do servidor")
+
+
+@router.post("/stop/all")
+async def stop_all_monitoring_route() -> Dict[str, Any]:
+    """
+    Interrompe o monitoramento para todas as câmeras ativas.
+    
+    Returns:
+        Dict com informações sobre as câmeras que foram interrompidas
+    """
+    try:
+        return await stop_all_monitoring()
+    except Exception as exc:
+        logger.error(f"Erro ao interromper monitoramento de todas as câmeras: {exc}")
+        raise HTTPException(status_code=500, detail="Erro interno do servidor")
+
 
 @router.post("/stop/{camera_id}")
 async def stop_monitoring_route(camera_id: int) -> Dict[str, str]:
@@ -76,19 +98,6 @@ async def stop_monitoring_route(camera_id: int) -> Dict[str, str]:
         logger.error(f"Erro ao interromper monitoramento para câmera {camera_id}: {exc}")
         raise HTTPException(status_code=500, detail="Erro interno do servidor")
 
-@router.post("/stop/all")
-async def stop_all_monitoring_route() -> Dict[str, Any]:
-    """
-    Interrompe o monitoramento para todas as câmeras ativas.
-    
-    Returns:
-        Dict com informações sobre as câmeras que foram interrompidas
-    """
-    try:
-        return await stop_all_monitoring()
-    except Exception as exc:
-        logger.error(f"Erro ao interromper monitoramento de todas as câmeras: {exc}")
-        raise HTTPException(status_code=500, detail="Erro interno do servidor")
 
 @router.get("/monitored", response_model=MonitoredCamerasResponse)
 async def get_monitored_cameras_route() -> Dict[str, List[Dict[str, Any]]]:
