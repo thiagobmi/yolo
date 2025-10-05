@@ -16,7 +16,20 @@
     
     <div class="container">
         <div class="detail-container">
-            <img src="/{{ event.image_path }}" alt="Evento {{ event.id }}" class="detail-image">
+            <!-- Comparação de imagens: Completa vs Recortada -->
+            <div class="image-comparison">
+                <div class="image-box">
+                    <h3>Imagem Completa com Bounding Box</h3>
+                    <img src="/{{ event.image_path }}" alt="Imagem completa">
+                </div>
+                
+                {% if event.cropped_path %}
+                <div class="image-box">
+                    <h3>Objeto Recortado</h3>
+                    <img src="/{{ event.cropped_path }}" alt="Objeto recortado">
+                </div>
+                {% endif %}
+            </div>
             
             <div class="detail-info">
                 <dl>
