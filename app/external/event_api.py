@@ -55,13 +55,13 @@ def send_event(event: Event) -> bool:
             return False
 
     except requests.exceptions.Timeout:
-        ...
-        # logger.error("Timeout ao enviar evento para o visualizador de eventos")
+        # ...
+        logger.error("Timeout ao enviar evento para o visualizador de eventos")
     except requests.exceptions.RequestException as e:
-        ...
-        # logger.error(f"Erro de requisição ao enviar evento para o visualizador: {e}")
+        # ...
+        logger.error(f"Erro de requisição ao enviar evento para o visualizador: {e}")
     except Exception as e:
-        ...
-        # logger.error(f"Erro geral ao enviar evento para o visualizador: {e}")
+        # ...
+        logger.error(f"Erro geral ao enviar evento para o visualizador: {e}")
 
     return False

@@ -135,7 +135,7 @@ def update_tracked_object(
             except Exception as e:
                 logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
 
-        # Inicializa objeto com área da bbox
+        # Inicializa objeto com área da bbox (sem initial_bbox)
         object_trackers[camera_id][track_id] = {
             "class": class_name,
             "last_seen": 0,
@@ -146,8 +146,7 @@ def update_tracked_object(
             "detection_history": [{"class": class_name, "confidence": confidence}],
             "first_seen": current_time,
             "last_seen_time": current_time,
-            "initial_bbox": bbox,
-            "max_bbox_area": current_area,  # Nova propriedade
+            "max_bbox_area": current_area,
         }
 
         frame_converter_executor.submit(process_frame_async)
@@ -157,6 +156,7 @@ def update_tracked_object(
         
         # Só atualiza a imagem se a área for pelo menos 20% maior
         if current_area > max_area * 1.2:
+            logger.info("Sybau")
             def process_frame_async():
                 try:
                     height, width = frame.shape[:2]
@@ -203,7 +203,6 @@ def update_tracked_object(
         object_trackers[camera_id][track_id]["detection_history"].append(
             {"class": class_name, "confidence": confidence}
         )
-
 
 
 def validate_detection_consistency(
@@ -345,12 +344,10 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
                         ),
                         "first_seen": tracker_data.get("first_seen"),
                         "frame": tracker_data.get("frame"),
-                        "initial_bbox": tracker_data.get("initial_bbox"),
                         "bbox_for_frame": tracker_data.get("bbox_for_frame"),
                         "detection_history": tracker_data.get("detection_history"),
                     }
                 )
-
             # Deleta objetos que já estão sem aparecer há muitos frames.
             if (
                 object_trackers[camera_id][track_id]["last_seen"]
