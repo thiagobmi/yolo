@@ -26,6 +26,9 @@ STREAM_FPS = 30
 
 # Thread pool para envio de eventos
 event_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="event_sender")
+frame_converter_executor = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="frame_converter"
+)
 
 
 def initialize_tracker_for_camera(camera_id: int) -> None:
@@ -89,81 +92,107 @@ def update_tracked_object(
     frame: np.ndarray,
     confidence: float,
 ) -> None:
-    """
-    Atualiza as informações de detecção de um objeto com redimensionamento configurável.
-    """
     is_new_object = track_id not in object_trackers[camera_id]
     current_time = datetime.datetime.now().isoformat()
-
     x1, y1, x2, y2 = bbox
 
-    # Testar se a bbox é valida
     if x1 >= x2 or y1 >= y2:
         return
 
+    # Calcula área da bbox atual
+    current_area = (x2 - x1) * (y2 - y1)
+
     if is_new_object:
-        try:
-            height, width = frame.shape[:2]
+        def process_frame_async():
+            try:
+                height, width = frame.shape[:2]
+                if width > settings.WIDTH_RESIZE:
+                    scale = settings.WIDTH_RESIZE / width
+                    new_width = settings.WIDTH_RESIZE
+                    new_height = int(height * scale)
+                    frame_resized = cv2.resize(frame, (new_width, new_height))
+                    bbox_for_frame = (
+                        int(x1 * scale),
+                        int(y1 * scale),
+                        int(x2 * scale),
+                        int(y2 * scale),
+                    )
+                else:
+                    frame_resized = frame
+                    bbox_for_frame = bbox
 
-            # Redimensiona o frame para economizar memória. width = WIDTH_RESIZE
-            if width > settings.WIDTH_RESIZE:
-                scale = settings.WIDTH_RESIZE / width
-                new_width = settings.WIDTH_RESIZE
-                new_height = int(height * scale)
-                frame_resized = cv2.resize(
-                    frame,
-                    (new_width, new_height),
-                    # interpolation=cv2.INTER_NEAREST
+                frame_bytes = convert_frame_to_bytes(
+                    frame_resized, settings.QUALITY_CONVERT
                 )
 
-                bbox_for_frame = (
-                    int(x1 * scale),
-                    int(y1 * scale),
-                    int(x2 * scale),
-                    int(y2 * scale),
+                object_trackers[camera_id][track_id].update(
+                    {
+                        "frame": frame_bytes,
+                        "bbox_for_frame": bbox_for_frame,
+                    }
                 )
-            else:
-                frame_resized = frame
-                bbox_for_frame = bbox
 
-            # Converter o frame. qualidade do jpeg = QUALITY_CONVERT.
-            frame_bytes = convert_frame_to_bytes(
-                frame_resized, settings.QUALITY_CONVERT
-            )
+            except Exception as e:
+                logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
 
-            object_trackers[camera_id][track_id] = {
-                "class": class_name,
-                "last_seen": 0,
-                "disappeared": False,
-                "bbox": bbox,
-                "frame": frame_bytes,
-                "bbox_for_frame": bbox_for_frame,
-                "detection_history": [
-                    {"class": class_name, "confidence": confidence}
-                ],  # Salva também a classe e conf de cada detecção.
-                "first_seen": current_time,
-                "last_seen_time": current_time,
-                "initial_bbox": bbox,
-            }
+        # Inicializa objeto com área da bbox
+        object_trackers[camera_id][track_id] = {
+            "class": class_name,
+            "last_seen": 0,
+            "disappeared": False,
+            "bbox": bbox,
+            "frame": None,
+            "bbox_for_frame": None,
+            "detection_history": [{"class": class_name, "confidence": confidence}],
+            "first_seen": current_time,
+            "last_seen_time": current_time,
+            "initial_bbox": bbox,
+            "max_bbox_area": current_area,  # Nova propriedade
+        }
 
-        except Exception as e:
-            # Fallback sem frame
-            logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
-
-            object_trackers[camera_id][track_id] = {
-                "class": class_name,
-                "last_seen": 0,
-                "disappeared": False,
-                "bbox": bbox,
-                "frame": None,
-                "bbox_for_frame": None,
-                "first_seen": current_time,
-                "detection_history": [{"class": class_name, "confidence": confidence}],
-                "last_seen_time": current_time,
-                "initial_bbox": bbox,
-            }
+        frame_converter_executor.submit(process_frame_async)
     else:
-        # Objeto com esse ID já existe. Atualização do objeto.
+        # Atualização: verifica se a bbox atual é pelo menos 20% maior
+        max_area = object_trackers[camera_id][track_id].get("max_bbox_area", 0)
+        
+        # Só atualiza a imagem se a área for pelo menos 20% maior
+        if current_area > max_area * 1.2:
+            def process_frame_async():
+                try:
+                    height, width = frame.shape[:2]
+                    if width > settings.WIDTH_RESIZE:
+                        scale = settings.WIDTH_RESIZE / width
+                        new_width = settings.WIDTH_RESIZE
+                        new_height = int(height * scale)
+                        frame_resized = cv2.resize(frame, (new_width, new_height))
+                        bbox_for_frame = (
+                            int(x1 * scale),
+                            int(y1 * scale),
+                            int(x2 * scale),
+                            int(y2 * scale),
+                        )
+                    else:
+                        frame_resized = frame
+                        bbox_for_frame = bbox
+
+                    frame_bytes = convert_frame_to_bytes(
+                        frame_resized, settings.QUALITY_CONVERT
+                    )
+
+                    object_trackers[camera_id][track_id].update(
+                        {
+                            "frame": frame_bytes,
+                            "bbox_for_frame": bbox_for_frame,
+                            "max_bbox_area": current_area,
+                        }
+                    )
+
+                except Exception as e:
+                    logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
+
+            frame_converter_executor.submit(process_frame_async)
+        
+        # Atualização normal (sempre feita)
         object_trackers[camera_id][track_id].update(
             {
                 "last_seen": 0,
@@ -206,7 +235,7 @@ def send_single_event(
     obj_data: dict, stream_config: StreamConfig, camera_id: int
 ) -> bool:
     """
-    Envia um único evento para o endpoint 
+    Envia um único evento para o endpoint
     """
     try:
         track_id = obj_data["track_id"]
@@ -260,16 +289,17 @@ def send_disappearance_events(
     stream_config: StreamConfig, camera_id: int, disappeared_objects: list
 ) -> None:
     """
-    Envia eventos para o endpoint usando threading. 
+    Envia eventos para o endpoint usando threading.
     """
     if not disappeared_objects:
         return
 
-    # Envia eventos em paralelo 
-    futures = []
+    # Envia eventos em paralelo
+    # futures = []
     for obj in disappeared_objects:
-        future = event_executor.submit(send_single_event, obj, stream_config, camera_id)
-        futures.append(future)
+        event_executor.submit(send_single_event, obj, stream_config, camera_id)
+        # future = event_executor.submit(send_single_event, obj, stream_config, camera_id)
+        # futures.append(future)
 
     # for future in as_completed(futures, timeout=5.0):
     #     try:
@@ -417,111 +447,129 @@ def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -> None
 
 
 def process_camera_stream(camera_info: CameraInfo, stream_config: StreamConfig) -> None:
-    """
-    Loop principal de processamento de stream da câmera com lógica de reconexão.
-    """
     cam_id = camera_info.camera_id
     local_model = YOLO(stream_config.detection_model_path)
-
     initialize_tracker_for_camera(cam_id)
-
-    capture = None
-    frames_processed = 0
     start_time = time.time()
-    reconnect_attempts = 0
+
+    frame_queue = queue.Queue(maxsize=2)
+    should_stop = threading.Event()
+
     max_reconnect_attempts = settings.MAX_RECONNECT_ATTEMPTS or 5
-    reconnect_delay = settings.INITIAL_RECONNECT_DELAY or 1
+    reconnect_delay = settings.INITIAL_RECONNECT_DELAY or 2
 
-    try:
-        while cam_id in active_streams and active_streams[cam_id]["active"]:
+    def capture_frames():
+        """Thread para captura com reconexão"""
+        capture = None
+        reconnect_count = 0
 
-            # Lógica de conexão/reconexão
+        while not should_stop.is_set():
+
+            # Conexão
             if capture is None or not capture.isOpened():
-                if reconnect_attempts >= max_reconnect_attempts:
-                    logger.error(
-                        f"Falha ao conectar à câmera {cam_id} após {max_reconnect_attempts} tentativas"
-                    )
+                if reconnect_count >= max_reconnect_attempts:
+                    logger.error(f"Câmera {cam_id}: máximo de reconexões atingido")
                     active_streams[cam_id]["active"] = False
                     break
 
-                if reconnect_attempts > 0:
-                    backoff_delay = min(
-                        reconnect_delay * (2 ** (reconnect_attempts - 1)), 30
-                    )
+                if reconnect_count > 0:
+                    wait_time = reconnect_delay * reconnect_count
                     logger.info(
-                        f"Aguardando {backoff_delay:.1f}s antes de reconectar câmera {cam_id}"
+                        f"Câmera {cam_id}: aguardando {wait_time}s para reconectar..."
                     )
-                    time.sleep(backoff_delay)
+                    time.sleep(wait_time)
+
+                logger.info(f"Câmera {cam_id}: conectando...")
 
                 try:
+                    if capture is not None:
+                        capture.release()
+
                     capture = cv2.VideoCapture(camera_info.url)
+                    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
                     if capture.isOpened():
-                        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        logger.info(f"Câmera {cam_id} conectada com sucesso")
-                        reconnect_attempts = 0
+                        connection_time = time.time()
+                        logger.info(
+                            f"Câmera {cam_id}: conectada com sucesso [{connection_time - start_time}s]"
+                        )
+                        reconnect_count = 0
                     else:
-                        logger.warning(f"Falha ao abrir câmera {cam_id}")
-                        reconnect_attempts += 1
-                        if capture:
-                            capture.release()
-                            capture = None
+                        logger.warning(f"Câmera {cam_id}: falha ao conectar")
+                        reconnect_count += 1
                         continue
 
                 except Exception as e:
-                    logger.error(f"Erro ao conectar câmera {cam_id}: {e}")
-                    reconnect_attempts += 1
-                    if capture:
-                        capture.release()
-                        capture = None
+                    logger.error(f"Câmera {cam_id}: erro ao conectar - {e}")
+                    reconnect_count += 1
                     continue
 
-            # Leitura do frame
+            # Lê frame
             try:
                 ret, frame = capture.read()
+
                 if not ret or frame is None:
-                    logger.warning(f"Falha ao ler frame da câmera {cam_id}")
+                    logger.warning(f"Câmera {cam_id}: falha ao ler frame")
                     capture.release()
                     capture = None
-                    reconnect_attempts += 1
+                    reconnect_count += 1
                     continue
 
-            except Exception as read_error:
-                logger.error(f"Erro ao ler frame da câmera {cam_id}: {read_error}")
-                capture.release()
-                capture = None
-                reconnect_attempts += 1
+                # Adiciona na queue (descarta frame novo se queue estiver cheia)
+                try:
+                    frame_queue.put(frame, block=False)
+                except queue.Full:
+                    pass
+
+            except Exception as e:
+                logger.error(f"Câmera {cam_id}: erro na leitura - {e}")
+                if capture is not None:
+                    capture.release()
+                    capture = None
+                reconnect_count += 1
+
+        # Cleanup
+        if capture is not None:
+            capture.release()
+        logger.info(f"Câmera {cam_id}: thread de captura encerrada")
+
+    # Inicia thread de captura
+    capture_thread = threading.Thread(target=capture_frames, daemon=True)
+    capture_thread.start()
+    time_connected = time.time()
+
+    frames_processed = 0
+
+    # Thread principal
+    try:
+        while cam_id in active_streams and active_streams[cam_id]["active"]:
+            try:
+                frame = frame_queue.get()
+                frames_processed += 1
+
+                if (
+                    frames_processed % (STREAM_FPS // stream_config.frames_per_second)
+                    == 0
+                ):
+                    process_frame(local_model, stream_config, frame)
+
+                if frames_processed % 300 == 0:
+                    elapsed = time.time() - time_connected
+                    fps = frames_processed / elapsed
+                    logger.info(
+                        f"Câmera {cam_id}: {frames_processed} frames, {fps:.1f} fps"
+                    )
+
+            except queue.Empty:
                 continue
 
-            frames_processed += 1
-
-            # Processar a cada N frames 
-            if frames_processed % (STREAM_FPS // stream_config.frames_per_second) == 0:
-                try:
-                    process_frame(local_model, stream_config, frame)
-                except Exception as e:
-                    logger.error(f"Erro ao processar frame {frames_processed}: {e}")
-
-            # Log de status 
-            # if frames_processed % 300 == 0:  # A cada 10 segundos aproximadamente
-            #     elapsed = time.time() - start_time
-            #     fps = frames_processed / elapsed
-            #     logger.info(
-            #         f"CÂMERA {cam_id}: {frames_processed} frames, {fps:.1f} fps média"
-            #     )
-
-            time.sleep(0.001)  # 1ms 
-
     finally:
-        if capture is not None and capture.isOpened():
-            capture.release()
-        if cam_id in active_streams:
-            active_streams[cam_id]["active"] = False
+        should_stop.set()
+        capture_thread.join(timeout=5)
 
-        elapsed = time.time() - start_time
-        final_fps = frames_processed / elapsed if elapsed > 0 else 0
+        elapsed = time.time() - time_connected
         logger.info(
-            f"Câmera {cam_id} encerrada - {frames_processed} frames em {elapsed:.1f}s ({final_fps:.1f} fps)"
+            f"Câmera {cam_id}: encerrada - {frames_processed} frames em {elapsed:.1f}s"
         )
 
 
