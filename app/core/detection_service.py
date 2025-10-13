@@ -1,3 +1,4 @@
+from os import wait
 import threading
 import time
 import datetime
@@ -24,8 +25,10 @@ logger = setup_logger("detection_service")
 _class_mapping_cache = {}
 STREAM_FPS = 30
 
-# Thread pool para envio de eventos
+# thread pool para envio de eventos
 event_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="event_sender")
+
+# thread pool para conversao de frames
 frame_converter_executor = ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="frame_converter"
 )
@@ -75,7 +78,7 @@ def extract_detections(result, scale_factor=1.0) -> List[Dict[str, Any]]:
                     )
                 else:
                     logger.warning(
-                        f"bbox inválida detectado: {(x1, y1, x2, y2)} para objeto {track_id}"
+                        f"bbox inválida detectada: {(x1, y1, x2, y2)} para objeto {track_id}"
                     )
 
             except Exception as e:
@@ -92,6 +95,8 @@ def update_tracked_object(
     frame: np.ndarray,
     confidence: float,
 ) -> None:
+
+
     is_new_object = track_id not in object_trackers[camera_id]
     current_time = datetime.datetime.now().isoformat()
     x1, y1, x2, y2 = bbox
@@ -99,10 +104,11 @@ def update_tracked_object(
     if x1 >= x2 or y1 >= y2:
         return
 
-    # Calcula área da bbox atual
+    # calcula área da bbox atual
     current_area = (x2 - x1) * (y2 - y1)
 
     if is_new_object:
+
         def process_frame_async():
             try:
                 height, width = frame.shape[:2]
@@ -135,7 +141,6 @@ def update_tracked_object(
             except Exception as e:
                 logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
 
-        # Inicializa objeto com área da bbox (sem initial_bbox)
         object_trackers[camera_id][track_id] = {
             "class": class_name,
             "last_seen": 0,
@@ -151,12 +156,13 @@ def update_tracked_object(
 
         frame_converter_executor.submit(process_frame_async)
     else:
-        # Atualização: verifica se a bbox atual é pelo menos 20% maior
+
         max_area = object_trackers[camera_id][track_id].get("max_bbox_area", 0)
-        
-        # Só atualiza a imagem se a área for pelo menos 20% maior
+
+        # só atualiza a imagem se a área for pelo menos 20% maior
         if current_area > max_area * 1.2:
             logger.info("Sybau")
+
             def process_frame_async():
                 try:
                     height, width = frame.shape[:2]
@@ -191,8 +197,8 @@ def update_tracked_object(
                     logger.error(f"Erro ao processar frame para objeto {track_id}: {e}")
 
             frame_converter_executor.submit(process_frame_async)
-        
-        # Atualização normal (sempre feita)
+
+        # atualização normal dos outros parametros
         object_trackers[camera_id][track_id].update(
             {
                 "last_seen": 0,
@@ -214,7 +220,7 @@ def validate_detection_consistency(
     if not detection_history:
         return False, ""
 
-    # Conta as ocorrências de cada classe
+    # conta as ocorrências de cada classe
     class_counts = Counter(detection["class"] for detection in detection_history)
 
     # encontra a classe mais comum
@@ -224,7 +230,7 @@ def validate_detection_consistency(
     total_detections = len(detection_history)
     percentage = most_common_count / total_detections
 
-    # Verifica se tem no mínimo essa porcentagem da mesma classe
+    # verifica se tem no mínimo essa porcentagem da mesma classe
     is_valid = percentage >= min_percentage
 
     return is_valid, most_common_class
@@ -276,7 +282,6 @@ def send_single_event(
             print=frame_bytes,
         )
 
-        # Chama a função síncrona de envio
         return send_event(event)
 
     except Exception as e:
@@ -293,7 +298,7 @@ def send_disappearance_events(
     if not disappeared_objects:
         return
 
-    # Envia eventos em paralelo
+    # envia eventos em paralelo
     # futures = []
     for obj in disappeared_objects:
         event_executor.submit(send_single_event, obj, stream_config, camera_id)
@@ -311,7 +316,7 @@ def send_disappearance_events(
 
 def process_disappearances(current_track_ids: set, stream_config: StreamConfig) -> list:
     """
-    Processa objetos rastreados e identifica aqueles que desapareceram.
+    Processa objetos rastreados e identifica os que desapareceram.
     """
     camera_id = stream_config.camera_id
     disappeared_objects = []
@@ -348,6 +353,7 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
                         "detection_history": tracker_data.get("detection_history"),
                     }
                 )
+
             # Deleta objetos que já estão sem aparecer há muitos frames.
             if (
                 object_trackers[camera_id][track_id]["last_seen"]
@@ -364,7 +370,7 @@ def process_disappearances(current_track_ids: set, stream_config: StreamConfig) 
 
 def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -> None:
     """
-    Processa um único frame de uma câmera e delega para análises de detecção.
+    Processa um único frame de uma câmera e delega para análises das detecções.
     """
     scale_factor = 1.0
     try:
@@ -432,6 +438,7 @@ def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -> None
         disappeared_objects = process_disappearances(current_track_ids, stream_config)
 
         if disappeared_objects:
+
             # Envia eventos usando thread separada
             threading.Thread(
                 target=send_disappearance_events,
@@ -444,6 +451,10 @@ def process_frame(model, stream_config: StreamConfig, frame: np.ndarray) -> None
 
 
 def process_camera_stream(camera_info: CameraInfo, stream_config: StreamConfig) -> None:
+    """
+    Gerencia a lógica de conexão, reconexão e processamento dos frames
+    """
+
     cam_id = camera_info.camera_id
     local_model = YOLO(stream_config.detection_model_path)
     initialize_tracker_for_camera(cam_id)
@@ -456,7 +467,7 @@ def process_camera_stream(camera_info: CameraInfo, stream_config: StreamConfig) 
     reconnect_delay = settings.INITIAL_RECONNECT_DELAY or 2
 
     def capture_frames():
-        """Thread para captura com reconexão"""
+        """Thread para captura dos frames, com reconexão"""
         capture = None
         reconnect_count = 0
 
@@ -577,11 +588,11 @@ def start_camera_processing(
     Inicia o processamento de uma câmera em uma thread separada.
     """
     thread = threading.Thread(
-        target=process_camera_stream,
-        args=(camera_info, stream_config),
-        name=f"camera_{camera_info.camera_id}",
-        daemon=False,
+    target=process_camera_stream,
+    args=(camera_info, stream_config),
+    daemon=True  # encerra junto com o processo principal
     )
+
     thread.start()
     return thread
 
@@ -597,3 +608,5 @@ def stop_all_cameras():
 
     # Finaliza o thread pool de eventos
     event_executor.shutdown(wait=True)
+
+    frame_converter_executor.shutdown(wait=True)

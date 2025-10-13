@@ -21,7 +21,7 @@ async def lifespan_event(app: FastAPI):
     """
     logger.info("Iniciando aplicação")
 
-    # initialize_nuv_api(SPECIFICATIONS_PATH)
+    initialize_nuv_api(SPECIFICATIONS_PATH)
     
     yield # Passa o controle da aplicação
     

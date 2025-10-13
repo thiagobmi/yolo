@@ -16,7 +16,6 @@ async def start_monitoring_camera(
     Inicia o monitoramento e detecção de objetos para uma câmera específica.
     
     Args:
-        camera_id: ID da câmera a ser monitorada.
         stream_config: Parâmetros de configuração do stream incluindo dispositivo, modelos,
                      e configurações de detecção.
                      
@@ -25,6 +24,7 @@ async def start_monitoring_camera(
     """
 
     camera_id = stream_config.camera_id
+
     # Verifica se a câmera já está sendo monitorada
     if camera_id in active_streams and active_streams[camera_id]["active"]:
         return {"detail": f"Câmera {camera_id} já está sendo monitorada", "camera": None}

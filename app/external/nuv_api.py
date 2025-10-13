@@ -103,15 +103,13 @@ async def get_camera_info(cam_id: int) -> Optional[CameraInfo]:
     Returns:
         Objeto CameraInfo com detalhes da câmera, se encontrada, None caso contrário.
     """
-    # Para desenvolvimento/testes
     # if settings.DEBUG:
-    return CameraInfo(
-        camera_id=cam_id, 
-        url=f"rtmp://localhost/stream/{cam_id}", 
-        active=True
-    )
+    # return CameraInfo(
+    #     camera_id=cam_id, 
+    #     url=f"rtmp://localhost/stream/{cam_id}", 
+    #     active=True
+    # )
     
-    # Integração real com a API
     response = get_camera_info_api(cam_id)
     
     if "detail" in response:
@@ -125,12 +123,6 @@ async def get_camera_info(cam_id: int) -> Optional[CameraInfo]:
         url=stream_url,
         active=response["is_active"],
     )
-
-
-
-
-
-
 
 
 

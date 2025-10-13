@@ -19,9 +19,3 @@ class TrackedObject(BaseModel):
 #     class_name: str
 #     bbox: Tuple[int, int, int, int]  # (x1, y1, x2, y2)
 
-# class DisappearedObject(BaseModel):
-#     """Modelo para objetos que desapareceram do campo de visão."""
-#     track_id: int
-#     class_name: str
-#     last_bbox: Tuple[int, int, int, int]
-#     last_seen_time: str

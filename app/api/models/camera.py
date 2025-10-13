@@ -12,12 +12,12 @@ class StreamConfig(BaseModel):
     camera_id: int
     device: str
     detection_model_path: str
-    classes: Optional[List[str]] = None
+    classes: Optional[List[str]] = None  # opcional
     tracker_model: str
     frames_per_second: int
     frames_before_disappearance: int
     confidence_threshold: float
-    min_track_frames: int = 7
+    min_track_frames: int = 7 # opcional
     iou: float
 
 class CameraResponse(BaseModel):

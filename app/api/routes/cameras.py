@@ -9,7 +9,7 @@ from app.core.camera_service import (
     stop_all_monitoring, 
     get_monitored_cameras
 )
-from app.core.detection_service import process_camera_stream
+from app.core.detection_service import start_camera_processing
 from app.utils.logging_utils import setup_logger
 
 logger = setup_logger("camera_routes")
@@ -35,7 +35,6 @@ async def start_monitoring(
     camera_id = stream_config.camera_id
     try:
         response = await start_monitoring_camera(stream_config)
-        print(response)
 
         # if(stream_config.frames_per_second <= 0):...
         # if(stream_config.frames_before_disappearance <= 0):...
@@ -44,12 +43,7 @@ async def start_monitoring(
         
         if "camera" in response and response["camera"] is not None:
             # Cria uma tarefa em background para cada stream
-            t = threading.Thread(
-            target=process_camera_stream,
-            args=(response["camera"], stream_config),
-            daemon=True  # encerra junto com o processo principal
-            )
-            t.start()
+            thread = start_camera_processing(response["camera"], stream_config)
             
         return response
     except Exception as exc:
